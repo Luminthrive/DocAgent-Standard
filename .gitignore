@@ -1,0 +1,4 @@
+*.md
+.env
+.jbeval
+.idea
