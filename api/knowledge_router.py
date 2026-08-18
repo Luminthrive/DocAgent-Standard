@@ -3,7 +3,8 @@ from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File
 from scripts.regsetup import description
 
 from core.auth import get_current_user_id
-from schema.knowledge_schema import CreateKnowledgeBaseRequest, KnowledgeBaseResponse, UploadResponse, DocumentResponse
+from schema.knowledge_schema import CreateKnowledgeBaseRequest, KnowledgeBaseResponse, UploadResponse, DocumentResponse, \
+    RetrieveRequest, RetrieveResponse
 from services.document_service import DocumentService
 from services.knowledge_service import KnowledgeService
 from services.vector_service import VectorService
@@ -117,6 +118,13 @@ async def delete_document(
         doc_id:str,
         user_id:str=Depends(get_current_user_id)
 ):
+    """
+    删除特定文档相关向量
+    :param kb_id:
+    :param doc_id:
+    :param user_id:
+    :return:
+    """
     kb=await kb_service.get_knowledge_base(kb_id,user_id)
     if not kb:
         raise HTTPException(status_code=404,detail="知识库不存在")
@@ -126,6 +134,23 @@ async def delete_document(
     await doc_service.delete_document(kb_id,doc_id)
     return {"status":"deleted","doc_id":doc_id}
 
-
+async def retrieve(
+        kb_id:str,
+        request:RetrieveRequest,
+        user_id:str=Depends(get_current_user_id)
+):
+    kb=await kb_service.get_knowledge_base(kb_id,user_id)
+    if not kb:
+        raise HTTPException(status_code=404,detail="知识库不存在")
+    results=await vector_service.search(
+        kb_id=kb_id,
+        query=request.query,
+        top_k=request.top_k
+    )
+    return RetrieveResponse(
+        query=request.query,
+        results=results,
+        count=len(results)
+    )
 
 
