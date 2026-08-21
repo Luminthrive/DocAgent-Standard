@@ -9,19 +9,18 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 from loguru import  logger
 
-from api import system_router
+from api import system_router, agent_router, knowledge_router
 from config import config
-from core.clients import init_db, init_redis, init_vector
+from core.clients import init_db, init_redis, init_vector, init_client, close_client
+from core.dependencies import init_services
+
 
 @asynccontextmanager
 async def lifespan(app:FastAPI):
-    app.state.db_client,app.state.db_session=await init_db()
-    app.state.redis_client=await init_redis()
-    app.state.vector_client=await init_vector()
+    await init_client(app)
+    await init_services(app)
     yield
-    await app.state.db_client.close()
-    await app.state.redis_client.close()
-    await app.state.vector_client.close()
+    await close_client(app)
 app=FastAPI(
     title="DocAgent",
     description="一个企业级知识库系统，包含RAG，Agent",
@@ -100,6 +99,8 @@ def register_exeception_handlers(app:FastAPI)->None:
 register_exeception_handlers(app)
 
 app.include_router(system_router,prefix="/api/health",tags=["系统"])
+app.include_router(knowledge_router,prefix="/api/knowledge",tags=["知识库"])
+app.include_router(agent_router,prefix="/api/agent",tags=["agent会话"])
 
 if __name__=="__main__":
     import uvicorn

@@ -3,22 +3,22 @@ from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File
 from scripts.regsetup import description
 
 from core.auth import get_current_user_id
+from core.dependencies import get_knowledge_service, get_document_service, get_vector_service
 from schema.knowledge_schema import CreateKnowledgeBaseRequest, KnowledgeBaseResponse, UploadResponse, DocumentResponse, \
     RetrieveRequest, RetrieveResponse
-from services.document_service import DocumentService
-from services.knowledge_service import KnowledgeService
-from services.vector_service import VectorService
+
 
 router=APIRouter()
-
-kb_service=KnowledgeService()
-doc_service=DocumentService()
-vector_service=VectorService()
+#接下里将这三个服务改为依赖注入
+# kb_service=KnowledgeService()
+# doc_service=DocumentService()
+# vector_service=VectorService()
 
 @router.post("/bases",response_model=KnowledgeBaseResponse,summary="创建知识库")
 async def create_knowledge_base(
         request:CreateKnowledgeBaseRequest,
-        user_id:str=Depends(get_current_user_id)
+        user_id:str=Depends(get_current_user_id),
+        kb_service=Depends(get_knowledge_service)
 ):
     """
     创建知识库
@@ -37,7 +37,8 @@ async def create_knowledge_base(
 async def list_knowledge_bases(
         limit:int=Query(50,ge=1,le=100,description="每页数量"),
         offset:int=Query(0,ge=0,description="偏移量"),
-        user_id:str=Depends(get_current_user_id)
+        user_id:str=Depends(get_current_user_id),
+        kb_service=Depends(get_knowledge_service)
 ):
     """
     列出知识库
@@ -56,7 +57,8 @@ async def list_knowledge_bases(
 @router.delete("/bases/{kb_id}",summary="删除知识库")
 async def delete_knowledge_base(
         kb_id:str,
-        user_id:str=Depends(get_current_user_id)
+        user_id:str=Depends(get_current_user_id),
+        kb_service=Depends(get_knowledge_service)
 ):
     """
     删除知识库及其所有文档，分块向量
@@ -74,7 +76,9 @@ async def delete_knowledge_base(
 async def upload_document(
         kb_id:str,
         file:UploadFile=File(...,description="文档文件"),
-        user_id:str=Depends(get_current_user_id)
+        user_id:str=Depends(get_current_user_id),
+        kb_service=Depends(get_knowledge_service),
+        doc_service=Depends(get_document_service)
 ):
     """
     上传文档到知识库
@@ -103,7 +107,9 @@ async def upload_document(
 @router.get("/bases/{kb_id}/documents",response_model=list[DocumentResponse],summary="文档列表")
 async def list_documents(
         kb_id:str,
-        user_id:str=Depends(get_current_user_id)
+        user_id:str=Depends(get_current_user_id),
+        kb_service=Depends(get_knowledge_service),
+        doc_service=Depends(get_document_service)
 ):
     """获取知识库下所有文档"""
     kb=await kb_service.get_knowledge_base(kb_id,user_id)
@@ -116,7 +122,9 @@ async def list_documents(
 async def delete_document(
         kb_id:str,
         doc_id:str,
-        user_id:str=Depends(get_current_user_id)
+        user_id:str=Depends(get_current_user_id),
+        kb_service=Depends(get_knowledge_service),
+        doc_service=Depends(get_document_service),
 ):
     """
     删除特定文档相关向量
@@ -137,7 +145,9 @@ async def delete_document(
 async def retrieve(
         kb_id:str,
         request:RetrieveRequest,
-        user_id:str=Depends(get_current_user_id)
+        user_id:str=Depends(get_current_user_id),
+        kb_service=Depends(get_knowledge_service),
+        vector_service=Depends(get_vector_service)
 ):
     kb=await kb_service.get_knowledge_base(kb_id,user_id)
     if not kb:
