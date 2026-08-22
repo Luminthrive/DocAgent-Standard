@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from services.document_service import DocumentService
 from services.knowledge_service import KnowledgeService
 from services.parse_service import ParseService
+from services.session_service import SessionService
 from services.vector_service import VectorService
 
 
@@ -26,12 +27,18 @@ async def init_document_service(app:FastAPI):
     )
     app.state.document_service=document_service
 
+async def init_session_service(app:FastAPI):
+    session_service=SessionService(
+        app.state.db_session_factory
+    )
+    app.state.session_service=session_service
 
 async def init_services(app:FastAPI):
     await init_vector_service(app)
     await init_knowledge_service(app)
     await init_parse_service(app)
     await init_document_service(app)
+    await init_session_service(app)
 
 async def get_knowledge_service(app:FastAPI):
     return app.state.kb_service
@@ -44,3 +51,6 @@ async def get_parse_service(app:FastAPI):
 
 async def get_document_service(app:FastAPI):
     return app.state.document_service
+
+async def get_session_service(app:FastAPI):
+    return app.state.session_service

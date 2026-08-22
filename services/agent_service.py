@@ -1,7 +1,10 @@
 
 
 class AgentService:
-    ...
+    def __init__(self,session_service):
+        self.session_service=session_service
+
+
 
     async def handle_human_confirmation(self, session_id, user_id, confirmation):
         pass
