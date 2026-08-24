@@ -1,24 +1,19 @@
-from gc import enable
 
 from fastapi import APIRouter, Depends, Query, HTTPException
-from scripts.regsetup import description
 from starlette.responses import StreamingResponse
-
 from core.auth import get_current_user_id
+from core.dependencies import get_session_service, get_agent_service
 from schema.agent_schema import CreateSessionRequest, SessionResponse, MessageResponse, RunAgentRequest, \
     HumanReviewRequired, AgentRunResponse
-from services.agent_service import AgentService
-from services.session_service import SessionService
+
 
 router=APIRouter()
-
-agent_service=AgentService()
-session_service=SessionService()
 
 @router.post("/sessions",response_model=SessionResponse,summary="创建会话")
 async def create_session(
         request:CreateSessionRequest,
-        user_id:str=Depends(get_current_user_id)
+        user_id:str=Depends(get_current_user_id),
+        session_service=Depends(get_session_service)
 ):
     """
     创建会话
@@ -37,7 +32,8 @@ async def create_session(
 async def list_sessions(
         limit:int=Query(20,ge=1,le=100,description="每页数量"),
         offset:int=Query(0,ge=0,description="偏移量"),
-        user_id:str=Depends(get_current_user_id)
+        user_id:str=Depends(get_current_user_id),
+        session_service=Depends(get_session_service)
 ):
     """
     获取用户会话列表
@@ -56,7 +52,8 @@ async def list_sessions(
 @router.get("/sessions/{session_id}/messages",response_model=list[MessageResponse],summary="获取会话消息")
 async def get_message(
         session_id:str,
-        user_id:str=Depends(get_current_user_id)
+        user_id:str=Depends(get_current_user_id),
+        session_service=Depends(get_session_service)
 ):
     """
     获取指定会话的会话历史
@@ -73,7 +70,8 @@ async def get_message(
 @router.delete("/sessions/{session_id}",summary="删除会话")
 async def delete_session(
         session_id:str,
-        user_id:str=Depends(get_current_user_id)
+        user_id:str=Depends(get_current_user_id),
+        session_service=Depends(get_session_service)
 ):
     """删除指定会话及其所有消息"""
     session=await session_service.get_session(session_id,user_id)
@@ -86,7 +84,9 @@ async def delete_session(
 async def run_agent(
         session_id:str,
         request:RunAgentRequest,
-        user_id:str=Depends(get_current_user_id)
+        user_id:str=Depends(get_current_user_id),
+        session_service=Depends(get_session_service),
+        agent_service=Depends(get_agent_service)
 ):
     session=await session_service.get_session(session_id,user_id)
     if not session:
@@ -125,8 +125,5 @@ async def run_agent(
             self_rag_score=result.get("self_rag_score",0.0),
             message="检索质量不足，请确认是否继续"
         )
-
-    if not request.enable_trace:
-        result["react_steps"]=[]
 
     return AgentRunResponse(**result)

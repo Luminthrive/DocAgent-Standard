@@ -1,7 +1,5 @@
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-
-from langchain_core.agents import AgentStep
 from pydantic import BaseModel, Field
 
 
@@ -51,7 +49,6 @@ class AgentRunResponse(BaseModel):
     trace_id:str
     answer:str
     session_id:str
-    react_steps:List[AgentStep]
     self_rag_score:Optional[float]
     need_human_review:bool
     latency_ms:int
