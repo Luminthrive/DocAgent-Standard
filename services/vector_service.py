@@ -4,7 +4,7 @@ from typing import List, Dict, Any
 
 from langchain_openai import OpenAIEmbeddings
 from loguru import logger
-from qdrant_client.conversions.common_types import Distance, Filter
+from qdrant_client.http.models.models import Distance, Filter
 from qdrant_client.http.models import VectorParams, FieldCondition, MatchValue, PointStruct
 from config import config
 
@@ -55,9 +55,9 @@ class VectorService:
             })
         return results
 
-    async def add_vector(self,kb_id:str,doc_id:str,texts:List[str],file_name:str="")->int:
+    async def add_vector(self,kb_id:str,doc_id:str,texts:List[str],file_name:str="")->List[str]:
         if not texts:
-            return 0
+            return []
         await self.ensure_collection()
         vectors=await self.embeddings.aembed_documents(texts)
         point_ids=[str(uuid.uuid4()) for _ in texts]
@@ -70,9 +70,9 @@ class VectorService:
                 "text":text,
             }) for pid ,text,vec,idx in zip(point_ids,texts,vectors,range(len(texts)))
         ]
-        await self.client.upsert(collecton_name=config.qdrant_collection,points=points)
+        await self.client.upsert(collection_name=config.qdrant_collection,points=points)
         logger.info(f"向量入库:kb_id={kb_id} doc_id={doc_id} count={len(points)}")
-        return len(point_ids)
+        return point_ids
 
     async def delete_by_doc_id(self,kb_id:str,doc_id:str)->int:
         q_filter=Filter(must=[FieldCondition(key="doc_id",match=MatchValue(value=doc_id))])

@@ -1,15 +1,17 @@
 from collections import defaultdict
 from contextlib import asynccontextmanager
-from datetime import time
+import time
 
-from aiohttp.abc import HTTPException
+from fastapi import HTTPException
 from fastapi import FastAPI,Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 from loguru import  logger
 
-from api import system_router, agent_router, knowledge_router
+from api.system_router import router as system_router
+from api.agent_router import router as agent_router
+from api.knowledge_router import router as knowledge_router
 from config import config
 from core.clients import init_db, init_redis, init_vector, init_client, close_client
 from core.dependencies import init_services
@@ -58,7 +60,7 @@ class RequsetLogMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
     async def dispatch(self,request:Request,call_next):
         start=time.time()
-        response=call_next(request)
+        response=await call_next(request)
         end=time.time()
         logger.info(f"{request.method}{request.url.path}->{response.status_code}{(end-start)*1000}ms")
         return response

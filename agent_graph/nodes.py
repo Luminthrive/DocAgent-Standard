@@ -6,7 +6,7 @@ from agent_graph.prompts import ASSISTANT_PROMPT, ANSWER_PROMPT, HUMAN_CONFIRMAT
     COMPRESS_SUMMARY_PROMPT
 from agent_graph.state import AgentState
 from loguru import logger
-from agent_graph.util import build_context, get_llm, get_last_user_message, get_last_tool_result, truncate_tool_result
+from agent_graph.util import build_context, get_llm, get_last_user_message, get_last_tool_result
 from config import config
 
 
@@ -21,12 +21,24 @@ def create_node(tools):
         )
 
         context=build_context(state)
-        effective_query=get_last_user_message(state["messages"]) or query
+        effective_query=query or get_last_user_message(state["messages"]) or ""
 
         prompt_messages=ASSISTANT_PROMPT.format_messages(
             context=context,query=effective_query,user_id=user_id
         )
-        resp=await get_llm(temperature=0.1).bind_tools(tools).ainvoke(prompt_messages)
+        messages=prompt_messages+state.get("messages",[])
+
+        logger.info(
+            f"[trace:{trace_id}] [assistant_node] "
+            f"effective_query='{effective_query[:80]}'"
+        )
+        resp=await get_llm(temperature=0.1).bind_tools(tools).ainvoke(messages)
+
+        logger.info(
+            f"[trace:{trace_id}] [assistant_node] "
+            f"resp.tool_calls={resp.tool_calls} "
+            f"content='{str(resp.content)[:150]}'"
+        )
 
         return {"messages":[resp]}
 
@@ -45,13 +57,47 @@ def create_node(tools):
         tool_map={tool.name:tool for tool in tools}
         result_messages=[]
 
+        # 重复调用防护：检测上一轮 assistant 是否调用了完全相同的工具和参数
+        prev_call_keys=set()
+        skip_current=True
+        for msg in reversed(messages):
+            if isinstance(msg,AIMessage) and msg.tool_calls:
+                if skip_current:
+                    skip_current=False
+                    continue
+                for pc in msg.tool_calls:
+                    prev_call_keys.add((pc["name"],json.dumps(pc["args"],sort_keys=True,ensure_ascii=False)))
+                break
+            if isinstance(msg,ToolMessage):
+                continue
+            break
+
         for call in last_calls:
             tool_name=call["name"]
             tool_args=call["args"]
             call_id=call.get("id",f"call_{tool_name}")
+
+            call_key=(tool_name,json.dumps(tool_args,sort_keys=True,ensure_ascii=False))
+            if call_key in prev_call_keys:
+                logger.warning(
+                    f"[trace:{trace_id}] [tools_node] "
+                    f"阻止重复调用 name={tool_name} args={tool_args}"
+                )
+                result_messages.append(
+                    ToolMessage(
+                        content=json.dumps(
+                            {"error":f"禁止重复调用相同工具和参数: {tool_name}"},
+                            ensure_ascii=False
+                        ),
+                        name=tool_name,
+                        tool_call_id=call_id
+                    )
+                )
+                continue
+
             tool_func=tool_map.get(tool_name)
             if not tool_func:
-                logger.error(f"[trace:{trace_id}]",f"[tools_node] 未知工具:{tool_name}")
+                logger.error(f"[trace:{trace_id}] [tools_node] 未知工具:{tool_name}")
                 result_messages.append(
                     ToolMessage(
                         content=json.dumps(
@@ -67,7 +113,7 @@ def create_node(tools):
                 continue
 
 
-            if (tool_name=="rag_search" and state.get("current_query")):
+            if (tool_name=="rag_search" and not tool_args.get("query")):
                 tool_args["query"]=state["current_query"]
 
             if (tool_name=="rag_search" and not tool_args.get("kb_id")):
@@ -78,12 +124,11 @@ def create_node(tools):
             if tool_name=="list_knowledge_bases":
                 user_id=state.get("user_id")
                 if user_id is not None:
-                    tool_args["user_id"]=user_id
+                    tool_args["user_id"]=int(user_id)
             logger.info(
                 f"[trace:{trace_id}] [tools_node] "
                 f"执行工具 name={tool_name} args={tool_args}"
             )
-            message=None
 
             try:
                 start_ms = time.time() * 1000
@@ -151,13 +196,13 @@ def create_node(tools):
         else:
             scores=[]
             query_words=set(query.lower().split())
-            for doc in docs[:-3]:
+            for doc in docs:
                 text=doc.get("text","")[:500].lower()
                 overlap=len(query_words & set(text.split()))/max(len(query_words),1)
                 vec_score=doc.get("score",0.5)
                 doc_score=overlap*0.3+vec_score*0.7
                 scores.append(doc_score)
-            self_rag_score=sum(scores)/len(scores)
+            self_rag_score=sum(scores)/len(scores) if scores else 0.0
 
         score=round(self_rag_score,3)
         logger.info(
@@ -184,25 +229,17 @@ def create_node(tools):
         start_ms=time.time()*1000
         trace_id=state.get("trace_id","")
         query=state.get("current_query") or ""
-        rag_result=get_last_tool_result(state["messages"],"rag_search")
-        effective_query=get_last_user_message(state["messages"]) or query
 
         history_context=build_context(state)
-        context=f"用户问题：\n{effective_query}\n\n"
-        if rag_result:
-            context+=f"[rag_search]{truncate_tool_result('rag_search',rag_result)}"
-        else:
-            context+=(
-                "【注意】当前没有调用过任何工具,没有任何操作被实际执行。"
-                "请诚实地告诉用户你尚未执行任何操作,不要编造\"已完成\"、\"已创建\"等虚假结果。"
-            )
+        effective_query=get_last_user_message(state["messages"]) or query
 
-        prompt_messages=ANSWER_PROMPT.format_messages(history=history_context,context=context,query=effective_query)
-        resp=await get_llm(temperature=0.7).ainvoke(prompt_messages)
+        prompt_messages=ANSWER_PROMPT.format_messages(history=history_context,query=effective_query)
+        messages=prompt_messages+state.get("messages",[])
+        resp=await get_llm(temperature=0.7).ainvoke(messages)
 
         logger.info(
             f"[trace:{trace_id}] [answer_node] "
-            f"生成回答: len={len(resp.content)} duration=..."
+            f"生成回答: len={len(resp.content)} duration={time.time()*1000-start_ms}ms"
         )
         return {"messages":[AIMessage(content=resp.content)]}
 
@@ -213,7 +250,6 @@ def create_node(tools):
         rag_result=get_last_tool_result(state["messages"],"rag_search") or {}
         docs=rag_result.get("docs") or []
 
-        context=""
         if docs:
             context_parts=[]
             for i,doc in enumerate(docs[:3],1):
@@ -230,7 +266,7 @@ def create_node(tools):
 
         user_confirmation=interrupt({
             "question":query,
-            "contexst":context,
+            "context":context,
             "confirmation_text":confirmation_text,
             "self_rag_score":state.get("self_rag_score",0.0),
             "status":"pending"
@@ -238,7 +274,7 @@ def create_node(tools):
 
         logger.info(
             f"[trace:{trace_id}] [human_intervention] "
-            f"等待人工确认 status={...} "
+            f"等待人工确认 status=pending "
             f"duration={time.time()*1000-start_ms}ms"
         )
         return {"human_confirmation":user_confirmation}

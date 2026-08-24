@@ -18,13 +18,13 @@ embedding_model=os.getenv("EMBEDDING_MODEL")
 qdrant_collection="docagent"
 qdrant_collection_size=1024
 
-knowledge_base_dir=Path(__path__).parent.parent/"data"/"kb"
+knowledge_base_dir=Path(__file__).parent.parent/"data"/"kb"
 
 max_self_rag_retries=3
 max_agent_iterations=8
 max_history_turns=10
 
-llm_model=os.getenv("EMBEDDING_MODEL")
+llm_model=os.getenv("LLM_MODEL")
 llm_base_url=os.getenv("OPENAI_BASE_URL")
 llm_api_key=os.getenv("OPENAI_API_KEY")
 llm_retries=3

@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from agent_graph.checkpointer import create_checkpointer
 from agent_graph.graph_builder import build_graph
@@ -58,20 +58,20 @@ async def init_services(app:FastAPI):
     await init_graph(app)
     await init_agent_service(app)
 
-async def get_knowledge_service(app:FastAPI):
-    return app.state.kb_service
+async def get_knowledge_service(request:Request):
+    return request.app.state.kb_service
 
-async def get_vector_service(app:FastAPI):
-    return app.state.vector_service
+async def get_vector_service(request:Request):
+    return request.app.state.vector_service
 
-async def get_parse_service(app:FastAPI):
-    return app.state.parse_service
+async def get_parse_service(request:Request):
+    return request.app.state.parse_service
 
-async def get_document_service(app:FastAPI):
-    return app.state.document_service
+async def get_document_service(request:Request):
+    return request.app.state.document_service
 
-async def get_session_service(app:FastAPI):
-    return app.state.session_service
+async def get_session_service(request:Request):
+    return request.app.state.session_service
 
-async def get_agent_service(app:FastAPI):
-    return app.state.agent_service
+async def get_agent_service(request:Request):
+    return request.app.state.agent_service

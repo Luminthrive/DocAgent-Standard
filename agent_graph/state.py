@@ -15,7 +15,7 @@ class AgentState(MessagesState):
 
     self_rag_score:Optional[float]
 
-    retry_count:int
+    retry_count:int=0
 
     human_confirmation:Optional[Dict[str,Any]]
 

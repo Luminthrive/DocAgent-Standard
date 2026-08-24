@@ -15,11 +15,11 @@ from langchain_core.prompts import ChatPromptTemplate
 
 RAG_ANSWER_PROMPT = """基于以下信息回答用户问题（请务必参考"对话历史"理解代词指代）:
 
-【对话历史】
+【业务上下文】
 {history}
 
-【参考文档】
-{context}
+【对话历史】
+请参考下方完整的对话记录，包括工具调用和返回结果。
 
 用户问题:
 {query}

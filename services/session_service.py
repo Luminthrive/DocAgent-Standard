@@ -2,7 +2,6 @@ import json
 from datetime import datetime
 from typing import Dict, Any
 from loguru import logger
-from pptx import content_type_to_part_class_map
 from sqlalchemy import select, delete
 
 from db.models import AgentSession, AgentMessage
@@ -27,14 +26,14 @@ class SessionService:
             "session_id":str(row.session_id),
             "role":row.role,
             "content":row.content or "",
-            "tool_calls":json.loads(row.tool_calls),
-            "tool_results":json.loads(row.tool_results),
+            "tool_calls":json.loads(row.tool_calls) if row.tool_calls else None,
+            "tool_results":json.loads(row.tool_results) if row.tool_results else None,
             "created_at":row.created_at
         }
 
     async def create_session(self, user_id, kb_id, title):
         if not title:
-            title=f"会话{datetime.now().strftime("%Y-%m-%d %H:%M")}"
+            title=f"会话{datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
         async with self.db_session_factory() as db_session:
             row=AgentSession(
@@ -93,10 +92,10 @@ class SessionService:
             )
             return [self.message_to_dict(r) for r in result.scalars().all()]
 
-    async def create_message(self,session_id,role,content,tool_calls,tool_results):
+    async def create_message(self,session_id,role,content,tool_calls=None,tool_results=None):
         async with self.db_session_factory() as db_session:
             row=AgentMessage(
-                session_id=session_id,
+                session_id=int(session_id),
                 role=role,
                 content=content,
                 tool_calls=json.dumps(tool_calls,ensure_ascii=False) if tool_calls else None,

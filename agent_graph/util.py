@@ -1,7 +1,7 @@
 import json
 from typing import Optional, Any, Mapping
 
-from langchain_core.messages import ToolMessage, HumanMessage, AIMessage
+from langchain_core.messages import ToolMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from config import config
 
@@ -51,51 +51,20 @@ def truncate_tool_result(tool_name:str,result:Any)->str:
     return text
 
 def build_context(state:Mapping)->str:
-    token_budget=config.context_token_budget
-    messages=state.get("messages",[])
     parts=[]
-    used_tokens=0
     query=state.get("current_query","")
     retry_count=state.get("retry_count",0)
+    self_rag_score=state.get("self_rag_score")
 
     if query:
         task_context=f"用户问题:{query}"
         if retry_count>0:
-            task_context+=f"\n（第{retry_count}次重试，已重写查询）"
+            task_context+=f"\n这是第{retry_count}次重试，当前查询已经过改写。"
         parts.append(f"## 当前任务\n{task_context}")
-        used_tokens+=estimate_tokens(task_context)
-    rag_result=get_last_tool_result(messages,"rag_search")
-    if rag_result:
-        tool_text=truncate_tool_result("rag_search",rag_result)
-        parts.append(f"## 工具返回结果\n{tool_text}")
-        used_tokens+=estimate_tokens(tool_text)
 
-    remaining=token_budget-used_tokens
-    if remaining>0:
-        recent_messages=messages[-config.recent_message_count:]
-        lines=[]
-        used=0
+    if self_rag_score is not None:
+        parts.append(f"## Self-RAG 状态\n当前检索评分:{self_rag_score:.3f}")
 
-        for msg in reversed(recent_messages):
-            if isinstance(msg,HumanMessage):
-                role="用户"
-            elif isinstance(msg,AIMessage):
-                role="助手"
-            else:
-                continue
-            content=str(msg.content or "")
-            if not content:
-                continue
-            content=content[:config.history_item_max_chars]
-            tokens=estimate_tokens(content)
-
-            if used+tokens>remaining:
-                break
-            lines.append(f"{role}:{content}")
-            used+=tokens
-        lines.reverse()
-        if lines:
-            parts.append("##最近对话\n"+"\n".join(lines))
     return "\n\n".join(parts)
 
 

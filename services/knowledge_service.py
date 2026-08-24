@@ -45,7 +45,10 @@ class KnowledgeService:
 
     async def delete_knowledge_base(self, kb_id):
         """需要删除知识库及其所有文档，分块，向量"""
-        await self.vector_service.delete_by_kb_id(int(kb_id))
+        try:
+            await self.vector_service.delete_by_kb_id(str(kb_id))
+        except Exception as e:
+            logger.warning(f"删除知识库向量失败(kb_id={kb_id}): {e}，继续删除数据库记录")
         async with self.db_session_factory() as db_session:
             await db_session.execute(
                 update(AgentSession)

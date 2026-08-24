@@ -1,6 +1,5 @@
 
 from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File
-from scripts.regsetup import description
 
 from core.auth import get_current_user_id
 from core.dependencies import get_knowledge_service, get_document_service, get_vector_service
@@ -142,6 +141,7 @@ async def delete_document(
     await doc_service.delete_document(kb_id,doc_id)
     return {"status":"deleted","doc_id":doc_id}
 
+@router.post("/bases/{kb_id}/retrieve",response_model=RetrieveResponse,summary="独立检索接口")
 async def retrieve(
         kb_id:str,
         request:RetrieveRequest,

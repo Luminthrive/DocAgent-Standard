@@ -17,8 +17,8 @@ def create_tools(vector_service,knowledge_service):
         return {"docs":docs,"count":len(docs)}
 
     @tool(description="列出当前用户拥有的全部知识库")
-    async def list_knowledge_bases(user_id:str)->Dict[str,Any]:
-        kbs=await knowledge_service.list_knowledge_bases(user_id=user_id)
+    async def list_knowledge_bases(user_id:int)->Dict[str,Any]:
+        kbs=await knowledge_service.list_knowledge_bases(user_id=user_id,limit=100,offset=0)
         return {"knowledge_bases":kbs,"count":len(kbs)}
 
     return [rag_search,list_knowledge_bases]

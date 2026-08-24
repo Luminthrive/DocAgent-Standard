@@ -38,9 +38,8 @@ class DocumentService:
         return chunks
 
     async def upload_document(self, kb_id, file, user_id):
-        kb_id=int(kb_id)
         #1 保存文件到磁盘
-        kb_dir=config.knowledge_base_dir/kb_id
+        kb_dir=config.knowledge_base_dir/str(kb_id)
         kb_dir.mkdir(parents=True,exist_ok=True)
         file_path=kb_dir/file.filename
         content=await file.read()
@@ -53,7 +52,7 @@ class DocumentService:
         async with self.db_session_factory() as db_session:
             #2 插入documents行
             doc=Document(
-                kb_id=kb_id,
+                kb_id=int(kb_id),
                 file_name=file.filename,
                 file_path=str(file_path),
                 file_type=file_type,
@@ -78,10 +77,11 @@ class DocumentService:
 
             #4 BGE_M3编码 +写入Qdrant （返回chunk的qdrant point id）
             try:
-                point_ids=await self.vector_service.add_vectors(
+                chunk_texts=[c.page_content for c in chunks]
+                point_ids=await self.vector_service.add_vector(
                     kb_id=str(kb_id),
                     doc_id=str(doc_id),
-                    texts=chunks,
+                    texts=chunk_texts,
                     file_name=file.filename
                 )
             except Exception as e:
@@ -94,8 +94,8 @@ class DocumentService:
 
 
             #5 逐chunk插入chunks映射
-            for idx,chunk in enumerate(chunks):
-                chunk=Chunk(doc_id=doc_id,kb_id=kb_id,content=chunk.page_content,chunk_index=idx,
+            for idx,chunk_doc in enumerate(chunks):
+                chunk=Chunk(doc_id=doc_id,kb_id=int(kb_id),content=chunk_doc.page_content,chunk_index=idx,
                             file_name=file.filename,vector_id=point_ids[idx])
                 db_session.add(chunk)
                 await db_session.flush()
@@ -104,7 +104,7 @@ class DocumentService:
             #6 更新文档状态+知识库计数
             doc.status="completed"
             doc.chunk_count=len(chunks)
-            kb=await db_session.get(KnowledgeBase,kb_id)
+            kb=await db_session.get(KnowledgeBase,int(kb_id))
             if kb:
                 kb.doc_count=(kb.doc_count or 0)+1
                 kb.chunk_count=(kb.chunk_count or 0)+len(chunks)
@@ -144,7 +144,7 @@ class DocumentService:
 
     async def delete_document(self, kb_id, doc_id):
         doc_id,kb_id=int(doc_id),int(kb_id)
-        await self.vector_service.delete_by_doc_id(kb_id,doc_id)
+        await self.vector_service.delete_by_doc_id(str(kb_id),str(doc_id))
         async with self.db_session_factory() as db_session:
             await db_session.execute(
                 delete(Chunk)
