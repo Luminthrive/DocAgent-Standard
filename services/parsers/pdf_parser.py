@@ -4,7 +4,9 @@ from typing import List
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
 from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from loguru import logger
 
 from services.parsers.base_parser import BaseParser
@@ -14,6 +16,13 @@ from config import config
 
 # 文本密度阈值：每页文本少于此字数判定为图片型
 OCR_TEXT_THRESHOLD = 50
+
+# 二级分块器（超长页自动分割，短页不受影响）
+_SECONDARY_SPLITTER = RecursiveCharacterTextSplitter(
+    chunk_size=1200,
+    chunk_overlap=150,
+    separators=["\n\n", "\n", "。", "；", "，", " ", ""],
+)
 
 # Vision OCR 提示词
 _OCR_PROMPT = (
@@ -34,16 +43,16 @@ def _get_vision_llm() -> ChatOpenAI:
         _vision_llm = ChatOpenAI(
             model=config.vision_model,
             base_url=config.vision_api_url,
-            api_key=config.vision_api_key,
-            max_tokens=4096,
+            api_key=SecretStr(config.vision_api_key or ""),
             temperature=0.0,
+            model_kwargs={"max_tokens": 4096},
         )
     return _vision_llm
 
 
 @register_parser(".pdf")
 class PDFParser(BaseParser):
-    """PDF 解析器 — 文本型直接提取，图片型调 Vision LLM OCR"""
+    """PDF 解析器 — 一级按页切分，二级递归分割超长页，图片型调 Vision OCR"""
 
     def parse(self, file_path: str) -> List[Document]:
         loader = PyPDFLoader(file_path)
@@ -54,7 +63,8 @@ class PDFParser(BaseParser):
         if docs and docs[0].metadata.get("title"):
             pdf_title = docs[0].metadata["title"]
 
-        chunks = []
+        # 一级：按页切分 + OCR 处理
+        page_chunks = []
         for page_doc in docs:
             page_num = page_doc.metadata.get("page", 0)
             text = page_doc.page_content
@@ -72,7 +82,7 @@ class PDFParser(BaseParser):
                     logger.warning(f"Vision OCR 未返回内容: page={page_num}")
 
             meta = build_base_metadata(
-                file_path, ".pdf", chunk_index=len(chunks), total_chunks=0,
+                file_path, ".pdf", chunk_index=len(page_chunks), total_chunks=0,
                 doc_title=pdf_title,
                 location_ref=f"第{page_num + 1}页",
                 extra={
@@ -81,22 +91,26 @@ class PDFParser(BaseParser):
                     "total_pages": len(docs),
                 },
             )
-            chunks.append(Document(page_content=text, metadata=meta))
+            page_chunks.append(Document(page_content=text, metadata=meta))
 
-        # 回填 total_chunks
-        for c in chunks:
-            c.metadata["total_chunks"] = len(chunks)
+        # 二级：递归分割（短页不受影响，超长页自动切分）
+        final_chunks = _SECONDARY_SPLITTER.split_documents(page_chunks)
 
-        return chunks
+        # 回填 chunk_index 和 total_chunks
+        total = len(final_chunks)
+        for i, c in enumerate(final_chunks):
+            c.metadata["chunk_index"] = i
+            c.metadata["total_chunks"] = total
+
+        return final_chunks
 
     def get_splitter(self):
-        """PDF 已按页切分，不再二次切分"""
+        """parse() 已完成全部分块"""
         return None
 
     @staticmethod
     def _ocr_page(file_path: str, page_num: int) -> str:
         """渲染 PDF 页面为图片 → 调 Vision LLM 识别文字"""
-        # 1. PyMuPDF 渲染页面为 PNG
         try:
             import fitz
             pdf_doc = fitz.open(file_path)
@@ -111,7 +125,6 @@ class PDFParser(BaseParser):
             logger.error(f"PDF 页面渲染失败: page={page_num} error={e}")
             return ""
 
-        # 2. 调 Vision LLM（ChatOpenAI，原生支持图片）
         if not config.vision_api_key:
             logger.warning("VISION_API_KEY 未配置，跳过 Vision OCR")
             return ""
