@@ -43,3 +43,8 @@ recent_message_count=20
 history_item_max_chars=500
 
 langgraph_checkpoint_ttl=604800
+
+# Vision OCR 配置（图片型 PDF 识别，复用 LLM 的 API 地址和 Key）
+vision_model=os.getenv("VISION_MODEL","mimo-v2.5pro")
+vision_api_url=os.getenv("VISION_API_URL") or llm_base_url
+vision_api_key=os.getenv("VISION_API_KEY") or llm_api_key

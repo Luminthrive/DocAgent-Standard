@@ -39,7 +39,7 @@ class RerankService:
             return []
 
         # 提取文档文本
-        doc_texts = [doc.get("text", "")[:512] for doc in documents]
+        doc_texts = [doc.get("content", {}).get("chunk_text", "")[:512] for doc in documents]
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:

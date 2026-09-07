@@ -237,7 +237,7 @@ def create_node(tools):
             query_words=set(query.lower().split())
             overlap_counts=0
             for doc in docs:
-                text=doc.get("text","")[:500].lower()
+                text=doc.get("content",{}).get("chunk_text","")[:500].lower()
                 doc_words=set(text.split())
                 if len(query_words & doc_words) > 0:
                     overlap_counts+=1
@@ -320,7 +320,7 @@ def create_node(tools):
             # 构建参考文档摘要
             doc_snippets=[]
             for i,doc in enumerate(docs[:3],1):
-                text=doc.get("text","")[:200]
+                text=doc.get("content",{}).get("chunk_text","")[:200]
                 doc_snippets.append(f"【片段{i}】{text}")
             docs_summary="\n".join(doc_snippets)
 
@@ -365,7 +365,7 @@ def create_node(tools):
         if docs:
             context_parts=[]
             for i,doc in enumerate(docs[:3],1):
-                text=doc.get("text","")[:300]
+                text=doc.get("content",{}).get("chunk_text","")[:300]
                 score=doc.get("rerank_score") or doc.get("score",0)
                 score_label="rerank" if doc.get("rerank_score") is not None else "vec"
                 context_parts.append(f"[{i}] ({score_label}:{score:.2f}) {text}")
@@ -418,7 +418,7 @@ def create_node(tools):
         # 获取上一轮检索结果作为参考
         rag_result=get_last_tool_result(state["messages"],"rag_search") or {}
         docs=rag_result.get("docs") or []
-        docs_text="\n".join(d.get("text","")[:200] for d in docs[:3])
+        docs_text="\n".join(d.get("content",{}).get("chunk_text","")[:200] for d in docs[:3])
 
         current_query=original
         try:

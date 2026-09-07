@@ -151,7 +151,7 @@ class HybridSearchService:
         for results in all_results:
             for doc in results:
                 # 生成去重 key
-                text = doc.get("text", "")[:200]
+                text = doc.get("content", {}).get("chunk_text", "")[:200]
                 doc_id = doc.get("metadata", {}).get("doc_id", "")
                 dedup_key = f"{doc_id}||{text}"
 

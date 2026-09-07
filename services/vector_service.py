@@ -72,6 +72,7 @@ class VectorService:
     async def search(self, kb_id: str, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """
         混合检索: Dense + Sparse + RRF 融合
+        返回: [{"score": ..., "metadata": {...}, "content": {"chunk_text": ..., "parsed_raw": ...}}, ...]
         """
         logger.info(f"混合检索：kb_id={kb_id}, query={query[:30]}, top_k={top_k}")
         await self.ensure_collection()
@@ -86,24 +87,14 @@ class VectorService:
             collection_name=config.qdrant_collection,
             query=Query(
                 prefetch=[
-                    # Dense 检索
-                    Prefetch(
-                        query=dense_vec,
-                        using="dense",
-                        limit=top_k * 2,
-                    ),
-                    # Sparse 检索
-                    Prefetch(
-                        query=sparse_vec,
-                        using="sparse",
-                        limit=top_k * 2,
-                    ),
+                    Prefetch(query=dense_vec, using="dense", limit=top_k * 2),
+                    Prefetch(query=sparse_vec, using="sparse", limit=top_k * 2),
                 ],
-                fusion=Fusion.RRF,  # 内置 RRF 融合
+                fusion=Fusion.RRF,
                 limit=top_k,
             ),
             query_filter=Filter(
-                must=[FieldCondition(key="kb_id", match=MatchValue(value=kb_id))]
+                must=[FieldCondition(key="metadata.kb_id", match=MatchValue(value=kb_id))]
             ),
             with_payload=True,
         )
@@ -111,22 +102,24 @@ class VectorService:
         results = []
         for p in resp.points:
             payload = p.payload or {}
-            meta = payload.get("metadata", {})
             results.append({
-                "text": payload.get("text", ""),
                 "score": round(float(p.score), 4),
-                "metadata": {
-                    "kb_id": payload.get("kb_id", kb_id),
-                    "doc_id": payload.get("doc_id", ""),
-                    "chunk_index": payload.get("chunk_index", 0),
-                    "file_name": payload.get("file_name", ""),
-                    **meta,
-                }
+                "metadata": payload.get("metadata", {}),
+                "content": payload.get("content", {}),
             })
         return results
 
-    async def add_vector(self, kb_id: str, doc_id: str, texts: List[str], file_name: str = "", metadatas: List[dict] = None) -> List[str]:
-        """添加向量 - 同时写入 dense 和 sparse"""
+    async def add_vector(
+        self,
+        texts: List[str],
+        payloads: List[Dict[str, Any]],
+        file_name: str = "",
+    ) -> List[str]:
+        """
+        添加向量 — 同时写入 dense + sparse
+        payloads: 每个元素是完整的 {"metadata": {...}, "content": {...}} 结构
+        texts: 与 payloads 一一对应的 embedding 文本（即 content.chunk_text）
+        """
         if not texts:
             return []
         await self.ensure_collection()
@@ -136,13 +129,10 @@ class VectorService:
         dense_vectors = encoded["dense"]
         sparse_results = encoded["sparse"]
 
-        if metadatas is None:
-            metadatas = [{} for _ in texts]
-
         point_ids = [str(uuid.uuid4()) for _ in texts]
         points = []
-        for pid, text, dense, sparse, idx, meta in zip(
-            point_ids, texts, dense_vectors, sparse_results, range(len(texts)), metadatas
+        for pid, text, dense, sparse, idx, payload in zip(
+            point_ids, texts, dense_vectors, sparse_results, range(len(texts)), payloads
         ):
             points.append(PointStruct(
                 id=pid,
@@ -150,25 +140,18 @@ class VectorService:
                     "dense": dense,
                     "sparse": sparse,
                 },
-                payload={
-                    "kb_id": kb_id,
-                    "doc_id": doc_id,
-                    "chunk_index": idx,
-                    "file_name": file_name,
-                    "text": text,
-                    "metadata": meta,
-                }
+                payload=payload,  # 已是完整的 {metadata: {...}, content: {...}}
             ))
 
         await self.client.upsert(
             collection_name=config.qdrant_collection,
             points=points
         )
-        logger.info(f"混合向量入库: kb_id={kb_id} doc_id={doc_id} count={len(points)}")
+        logger.info(f"混合向量入库: count={len(points)}")
         return point_ids
 
     async def delete_by_doc_id(self, kb_id: str, doc_id: str) -> int:
-        q_filter = Filter(must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))])
+        q_filter = Filter(must=[FieldCondition(key="metadata.doc_id", match=MatchValue(value=doc_id))])
         result = await self.client.delete(
             collection_name=config.qdrant_collection,
             points_selector=q_filter
@@ -178,7 +161,7 @@ class VectorService:
         return 1
 
     async def delete_by_kb_id(self, kb_id: str) -> int:
-        q_filter = Filter(must=[FieldCondition(key="kb_id", match=MatchValue(value=kb_id))])
+        q_filter = Filter(must=[FieldCondition(key="metadata.kb_id", match=MatchValue(value=kb_id))])
         result = await self.client.delete(
             collection_name=config.qdrant_collection,
             points_selector=q_filter
@@ -189,7 +172,7 @@ class VectorService:
 
     async def count(self, kb_id: str) -> int:
         try:
-            q_filter = Filter(must=[FieldCondition(key="kb_id", match=MatchValue(value=kb_id))])
+            q_filter = Filter(must=[FieldCondition(key="metadata.kb_id", match=MatchValue(value=kb_id))])
             result = await self.client.count(
                 collection_name=config.qdrant_collection,
                 count_filter=q_filter,

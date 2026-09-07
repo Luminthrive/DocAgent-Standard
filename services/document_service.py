@@ -1,21 +1,12 @@
 # 文档处理服务
 from typing import Dict, Any, List
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from loguru import logger
 from sqlalchemy import select, delete
 
 from db.models import Document, Chunk, KnowledgeBase
 from config import config
 from services.parsers import get_parser
-from services.parsers.base_parser import ParseResult
-
-# 通用后备分块器（当解析器未提供专用分块器时使用）
-_DEFAULT_SPLITTER = RecursiveCharacterTextSplitter(
-    chunk_size=1500,
-    chunk_overlap=150,
-    separators=["\n\n", "\n", "。", "；", "，", " ", ""],
-)
 
 
 class DocumentService:
@@ -40,11 +31,34 @@ class DocumentService:
 
     @staticmethod
     def chunk_split(paragraphs, splitter=None):
-        """分块：优先使用解析器提供的专用分块器"""
+        """分块：splitter 为 None 表示解析器已自行完成分块，不再二次切分"""
         if splitter is None:
-            splitter = _DEFAULT_SPLITTER
+            return paragraphs
         chunks = splitter.split_documents(paragraphs)
         return chunks
+
+    @staticmethod
+    def _post_process_chunks(chunks, file_path: str, file_type: str):
+        """分块后补算 offset_start/offset_end 和 location_ref（对缺少这些字段的 chunk）"""
+        from services.parsers.metadata_utils import normalize_file_type
+        ft = normalize_file_type(file_type)
+        offset = 0
+        for chunk in chunks:
+            meta = chunk.metadata
+            text_len = len(chunk.page_content)
+
+            # 补算字符偏移
+            if meta.get("offset_start") is None:
+                meta["offset_start"] = offset
+            if meta.get("offset_end") is None:
+                meta["offset_end"] = offset + text_len
+
+            # 补算 location_ref（仅对未设置的）
+            if not meta.get("location_ref"):
+                s, e = meta["offset_start"], meta["offset_end"]
+                meta["location_ref"] = f"字符偏移{s}-{e}"
+
+            offset += text_len
 
     async def upload_document(self, kb_id, file, user_id):
         # 1 保存文件到磁盘
@@ -71,18 +85,15 @@ class DocumentService:
             await db_session.flush()
             doc_id = doc.id
 
-            # 3 解析文档 → 获取 ParseResult
+            # 3 解析文档 → 获取 Document 列表（每个 Document 已携带元数据）
             try:
-                parse_result: ParseResult = await self.parse_service.parse_document(str(file_path), file_type)
+                paragraphs = await self.parse_service.parse_document(str(file_path), file_type)
             except ValueError as e:
                 doc.status = "failed"
                 doc.error_msg = str(e)
                 await db_session.commit()
                 return {"doc_id": str(doc_id), "file_name": file.filename,
                         "status": "failed", "message": doc.error_msg}
-
-            paragraphs = parse_result.documents
-            file_metadata = parse_result.metadata
 
             if not paragraphs:
                 doc.status = "failed"
@@ -103,24 +114,45 @@ class DocumentService:
                 return {"doc_id": str(doc_id), "file_name": file.filename,
                         "status": "failed", "message": doc.error_msg}
 
-            # 5 构建元数据列表：合并文件级 + chunk 级元数据
-            chunk_metadatas = []
-            for chunk_doc in chunks:
-                meta = {
-                    **file_metadata,
-                    **chunk_doc.metadata,
-                }
-                chunk_metadatas.append(meta)
+            # 4.5 分块后补算 offset / location_ref（对分块器产出的 chunk）
+            self._post_process_chunks(chunks, str(file_path), file_type)
 
-            # 6 BGE_M3 编码 + 写入 Qdrant（携带元数据）
+            # 5 注入 doc_id / chunk_id，提取 _parsed_raw，组装 Qdrant payload
+            doc_id_str = f"doc_{doc_id}"
+            qdrant_payloads = []
+            pg_metadatas = []
+
+            for idx, chunk_doc in enumerate(chunks):
+                meta = chunk_doc.metadata
+                chunk_id = f"{doc_id_str}_{idx:03d}"
+
+                # 注入标识字段
+                meta["doc_id"] = doc_id_str
+                meta["chunk_id"] = chunk_id
+                meta["chunk_index"] = idx
+                meta["kb_id"] = str(kb_id)
+
+                # 从 metadata 中提取 _parsed_raw（parser 临时存放的结构化内容）
+                parsed_raw = meta.pop("_parsed_raw", "")
+
+                # 构建 Qdrant payload：{metadata: {...}, content: {...}}
+                qdrant_payloads.append({
+                    "metadata": {k: v for k, v in meta.items()},  # metadata 层
+                    "content": {
+                        "chunk_text": chunk_doc.page_content,
+                        "parsed_raw": parsed_raw,
+                    },
+                })
+                # PG 存储用的 metadata（不含 content 层）
+                pg_metadatas.append(meta)
+
+            # 6 BGE_M3 编码 + 写入 Qdrant
             try:
                 chunk_texts = [c.page_content for c in chunks]
                 point_ids = await self.vector_service.add_vector(
-                    kb_id=str(kb_id),
-                    doc_id=str(doc_id),
                     texts=chunk_texts,
+                    payloads=qdrant_payloads,
                     file_name=file.filename,
-                    metadatas=chunk_metadatas,
                 )
             except Exception as e:
                 logger.info(f"向量化失败: kb_id={kb_id} doc_id={doc_id} error={e}")
@@ -130,7 +162,7 @@ class DocumentService:
                 return {"doc_id": str(doc_id), "file_name": file.filename,
                         "status": "failed", "message": doc.error_msg}
 
-            # 7 逐 chunk 插入 chunks 映射（携带 metadata_json）
+            # 7 逐 chunk 写入 PostgreSQL
             for idx, chunk_doc in enumerate(chunks):
                 chunk = Chunk(
                     doc_id=doc_id,
@@ -139,7 +171,7 @@ class DocumentService:
                     chunk_index=idx,
                     file_name=file.filename,
                     vector_id=point_ids[idx],
-                    metadata_json=chunk_metadatas[idx],
+                    metadata_json=pg_metadatas[idx],
                 )
                 db_session.add(chunk)
                 await db_session.flush()

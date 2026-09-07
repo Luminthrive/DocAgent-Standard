@@ -4,15 +4,16 @@ from pptx import Presentation
 from langchain_core.documents import Document
 from loguru import logger
 
-from services.parsers.base_parser import BaseParser, ParseResult
+from services.parsers.base_parser import BaseParser
 from services.parsers import register_parser
+from services.parsers.metadata_utils import build_base_metadata
 
 
 @register_parser(".pptx")
 class PPTXParser(BaseParser):
     """PPT 解析器 — 每张幻灯片一个 chunk"""
 
-    def parse(self, file_path: str) -> ParseResult:
+    def parse(self, file_path: str) -> List[Document]:
         prs = Presentation(file_path)
         docs = []
 
@@ -28,7 +29,6 @@ class PPTXParser(BaseParser):
                         para_text = para.text.strip()
                         if para_text:
                             text_parts.append(para_text)
-                            # 第一个有文字的 shape 通常视为标题
                             if not slide_title:
                                 slide_title = para_text
 
@@ -44,25 +44,26 @@ class PPTXParser(BaseParser):
             if not page_content.strip():
                 continue
 
-            docs.append(Document(
-                page_content=page_content,
-                metadata={
-                    "file_type": ".pptx",
+            meta = build_base_metadata(
+                file_path, ".pptx", chunk_index=len(docs), total_chunks=0,
+                doc_title=slide_title,
+                location_ref=f"幻灯片第{idx + 1}页",
+                extra={
                     "slide_number": idx + 1,
                     "slide_title": slide_title,
                     "has_notes": has_notes,
+                    "_parsed_raw": page_content,
                 },
-            ))
+            )
+            docs.append(Document(page_content=page_content, metadata=meta))
+
+        # 回填 total_chunks
+        for c in docs:
+            c.metadata["total_chunks"] = len(docs)
 
         logger.info(f"PPTX 解析完成: {len(docs)} slides")
-        return ParseResult(
-            documents=docs,
-            metadata={
-                "file_type": ".pptx",
-                "total_slides": len(docs),
-            },
-        )
+        return docs
 
     def get_splitter(self):
-        """PPT 不使用 LangChain TextSplitter，返回 None"""
+        """PPT 不使用 LangChain TextSplitter"""
         return None
