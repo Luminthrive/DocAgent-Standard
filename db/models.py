@@ -1,5 +1,5 @@
 
-from sqlalchemy import Column, Integer, ForeignKey, String, Text, DateTime, func
+from sqlalchemy import Column, Integer, ForeignKey, String, Text, DateTime, JSON, func
 from sqlalchemy.orm import DeclarativeBase
 
 
@@ -46,6 +46,7 @@ class Chunk(Base):
     chunk_index=Column(Integer)
     file_name=Column(String(255))
     vector_id=Column(String(64),unique=True)
+    metadata_json=Column(JSON,nullable=True,default=dict)
     created_at=Column(DateTime(timezone=True),server_default=func.now())
 
 class AgentSession(Base):

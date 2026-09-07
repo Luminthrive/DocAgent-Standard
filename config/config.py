@@ -12,13 +12,12 @@ QDRANT_URL=os.getenv("QDRANT_URL")
 backend_host="127.0.0.1"
 backend_port="8765"
 auth_api_key=os.getenv("API_KEY")
-# 模型服务器配置 (Embedding + Rerank + BM25)
+# 模型服务器配置 (BGE-M3: Dense+Sparse 一体化 + Rerank)
 model_server_url=os.getenv("MODEL_SERVER_URL","http://localhost:8001")
-embedding_model=os.getenv("EMBEDDING_MODEL","BAAI/bge-small-zh-v1.5")
+embedding_model=os.getenv("EMBEDDING_MODEL","BAAI/bge-m3")
 rerank_model=os.getenv("RERANK_MODEL","BAAI/bge-reranker-v2-m3")
-sparse_embedding_model=os.getenv("SPARSE_EMBEDDING_MODEL","Qdrant/bm25")
 qdrant_collection="docagent"
-qdrant_collection_size=1024
+qdrant_collection_size=1024  # BGE-M3 Dense 输出维度
 
 knowledge_base_dir=Path(__file__).parent.parent/"data"/"kb"
 

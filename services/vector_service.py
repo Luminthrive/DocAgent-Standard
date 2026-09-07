@@ -3,7 +3,6 @@ import uuid
 from typing import List, Dict, Any
 
 import httpx
-from langchain_openai import OpenAIEmbeddings
 from loguru import logger
 from qdrant_client.http.models.models import Distance, Filter
 from qdrant_client.http.models import (
@@ -17,46 +16,37 @@ from config import config
 class VectorService:
     """
     向量服务 - 支持混合检索
-    - Dense: 通过模型 API 获取 (语义检索)
-    - Sparse: 通过模型 API 获取 BM25 (关键词检索)
-    - 融合: Qdrant 内置 RRF
+    Dense + Sparse 均来自 BGE-M3 (单模型双路输出)
+    融合: Qdrant 内置 RRF
     """
 
     def __init__(self, vector_client):
-        # Dense embedding: 使用模型 API (OpenAI 兼容接口)
-        self.embeddings = OpenAIEmbeddings(
-            model=config.embedding_model,
-            base_url=f"{config.model_server_url}/v1",
-            api_key="not-needed",  # 模型服务器不需要 API key
-            check_embedding_ctx_length=False,
-            chunk_size=64,
-            max_retries=3,
-            request_timeout=300
-        )
         self.client = vector_client
         self.model_server_url = config.model_server_url
-        self.sparse_timeout = 30.0
+        self.request_timeout = 60.0
 
-    async def _encode_sparse(self, texts: List[str]) -> List[Dict[str, Any]]:
+    async def _encode(self, texts: List[str]) -> Dict[str, Any]:
         """
-        通过 API 获取 sparse embedding
+        通过 BGE-M3 API 获取 Dense + Sparse 向量 (单次调用)
+        返回: {"dense": List[List[float]], "sparse": List[Dict]}
         """
-        async with httpx.AsyncClient(timeout=self.sparse_timeout) as client:
+        async with httpx.AsyncClient(timeout=self.request_timeout) as client:
             response = await client.post(
-                f"{self.model_server_url}/v1/sparse_embeddings",
+                f"{self.model_server_url}/v1/embeddings",
                 json={"input": texts}
             )
             response.raise_for_status()
             result = response.json()
 
-        # 解析 sparse vectors
+        dense_vecs = []
         sparse_vecs = []
         for item in result.get("data", []):
+            dense_vecs.append(item["embedding"])
             sparse_vecs.append({
-                "indices": item["indices"],
-                "values": item["values"],
+                "indices": item["sparse_indices"],
+                "values": item["sparse_values"],
             })
-        return sparse_vecs
+        return {"dense": dense_vecs, "sparse": sparse_vecs}
 
     async def ensure_collection(self):
         """创建集合 - 同时配置 dense 和 sparse vectors"""
@@ -86,12 +76,10 @@ class VectorService:
         logger.info(f"混合检索：kb_id={kb_id}, query={query[:30]}, top_k={top_k}")
         await self.ensure_collection()
 
-        # Dense query vector (通过 API)
-        dense_vec = await self.embeddings.aembed_query(query)
-
-        # Sparse query vector (通过 API)
-        sparse_result = await self._encode_sparse([query])
-        sparse_vec = sparse_result[0] if sparse_result else {"indices": [], "values": []}
+        # BGE-M3 单次调用获取 Dense + Sparse
+        encoded = await self._encode([query])
+        dense_vec = encoded["dense"][0]
+        sparse_vec = encoded["sparse"][0]
 
         # Qdrant 原生混合检索 + 内置 RRF
         resp = await self.client.query_points(
@@ -123,6 +111,7 @@ class VectorService:
         results = []
         for p in resp.points:
             payload = p.payload or {}
+            meta = payload.get("metadata", {})
             results.append({
                 "text": payload.get("text", ""),
                 "score": round(float(p.score), 4),
@@ -131,26 +120,29 @@ class VectorService:
                     "doc_id": payload.get("doc_id", ""),
                     "chunk_index": payload.get("chunk_index", 0),
                     "file_name": payload.get("file_name", ""),
+                    **meta,
                 }
             })
         return results
 
-    async def add_vector(self, kb_id: str, doc_id: str, texts: List[str], file_name: str = "") -> List[str]:
+    async def add_vector(self, kb_id: str, doc_id: str, texts: List[str], file_name: str = "", metadatas: List[dict] = None) -> List[str]:
         """添加向量 - 同时写入 dense 和 sparse"""
         if not texts:
             return []
         await self.ensure_collection()
 
-        # Dense vectors (通过 API)
-        dense_vectors = await self.embeddings.aembed_documents(texts)
+        # BGE-M3 单次调用获取 Dense + Sparse
+        encoded = await self._encode(texts)
+        dense_vectors = encoded["dense"]
+        sparse_results = encoded["sparse"]
 
-        # Sparse vectors (通过 API)
-        sparse_results = await self._encode_sparse(texts)
+        if metadatas is None:
+            metadatas = [{} for _ in texts]
 
         point_ids = [str(uuid.uuid4()) for _ in texts]
         points = []
-        for pid, text, dense, sparse, idx in zip(
-            point_ids, texts, dense_vectors, sparse_results, range(len(texts))
+        for pid, text, dense, sparse, idx, meta in zip(
+            point_ids, texts, dense_vectors, sparse_results, range(len(texts)), metadatas
         ):
             points.append(PointStruct(
                 id=pid,
@@ -164,6 +156,7 @@ class VectorService:
                     "chunk_index": idx,
                     "file_name": file_name,
                     "text": text,
+                    "metadata": meta,
                 }
             ))
 
