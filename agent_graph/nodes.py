@@ -2,7 +2,7 @@ import json
 import time
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import interrupt
-from agent_graph.prompts import ASSISTANT_PROMPT, ANSWER_PROMPT, HUMAN_CONFIRMATION_PROMPT, COMPRESS_SUMMARY_PROMPT
+from agent_graph.prompts import ASSISTANT_PROMPT, ANSWER_PROMPT, HUMAN_CONFIRMATION_PROMPT, QUERY_REWRITE_PROMPT, COMPRESS_SUMMARY_PROMPT
 from agent_graph.state import AgentState
 from loguru import logger
 from agent_graph.util import build_context, get_llm, get_last_user_message, get_last_tool_result
@@ -288,6 +288,12 @@ def create_node(tools):
         return {"self_rag_score":score}
 
     async def answer_node(state:AgentState)->dict:
+        """
+        Answer节点：生成最终回答
+
+        兜底逻辑：
+        - 如果检索文档质量差，输出"信息不足"模板而非强行编造
+        """
         start_ms=time.time()*1000
         trace_id=state.get("trace_id","")
         query=state.get("current_query") or ""
@@ -295,6 +301,41 @@ def create_node(tools):
         history_context=build_context(state)
         effective_query=get_last_user_message(state["messages"]) or query
 
+        # 检查检索文档质量
+        rag_result=get_last_tool_result(state["messages"],"rag_search") or {}
+        docs=rag_result.get("docs") or []
+
+        # 文档质量检查
+        has_quality_docs=False
+        if docs:
+            # 检查是否有高质量文档（rerank_score > 0.3）
+            for doc in docs:
+                score=doc.get("rerank_score") or doc.get("score",0)
+                if score>0.3:
+                    has_quality_docs=True
+                    break
+
+        # 如果文档质量差，生成兜底回答
+        if not has_quality_docs and docs:
+            # 构建参考文档摘要
+            doc_snippets=[]
+            for i,doc in enumerate(docs[:3],1):
+                text=doc.get("text","")[:200]
+                doc_snippets.append(f"【片段{i}】{text}")
+            docs_summary="\n".join(doc_snippets)
+
+            fallback_response=(
+                f"当前检索未找到足够匹配的信息，以下为检索到的相关参考内容：\n\n"
+                f"{docs_summary}\n\n"
+                f"您可以尝试调整问题描述重新提问。"
+            )
+            logger.info(
+                f"[trace:{trace_id}] [answer_node] "
+                f"文档质量不足，返回兜底回答 duration={time.time()*1000-start_ms}ms"
+            )
+            return {"messages":[AIMessage(content=fallback_response)]}
+
+        # 正常回答流程
         prompt_messages=ANSWER_PROMPT.format_messages(history=history_context,query=effective_query)
         messages=prompt_messages+state.get("messages",[])
         resp=await get_llm(temperature=0.7).ainvoke(messages)
@@ -306,6 +347,15 @@ def create_node(tools):
         return {"messages":[AIMessage(content=resp.content)]}
 
     async def human_intervention_node(state:AgentState)->dict:
+        """
+        HITL人工介入节点（简化设计）
+
+        功能：
+        - 展示检索结果和评分
+        - 提供两个选择：
+          1. edit_query: 修改query后继续检索（保留所有状态）
+          2. force_answer: 直接生成回答（跳过检索）
+        """
         start_ms=time.time()*1000
         trace_id=state.get("trace_id","")
         query=state.get("current_query") or ""
@@ -316,7 +366,6 @@ def create_node(tools):
             context_parts=[]
             for i,doc in enumerate(docs[:3],1):
                 text=doc.get("text","")[:300]
-                # 优先使用 rerank_score，降级到 score
                 score=doc.get("rerank_score") or doc.get("score",0)
                 score_label="rerank" if doc.get("rerank_score") is not None else "vec"
                 context_parts.append(f"[{i}] ({score_label}:{score:.2f}) {text}")
@@ -328,45 +377,98 @@ def create_node(tools):
         resp=await get_llm(temperature=0.7).ainvoke(prompt)
         confirmation_text=str(resp.content)
 
-        user_confirmation=interrupt({
+        # interrupt返回用户选择：{mode: "edit_query"|"force_answer", edited_query?: string}
+        user_choice=interrupt({
             "question":query,
             "context":context,
             "confirmation_text":confirmation_text,
             "self_rag_score":state.get("self_rag_score",0.0),
+            "options":["edit_query","force_answer"],
             "status":"pending"
         })
 
+        hitl_mode=user_choice.get("mode","edit_query") if isinstance(user_choice,dict) else "edit_query"
+        human_edited_query=user_choice.get("edited_query") if isinstance(user_choice,dict) else None
+
         logger.info(
             f"[trace:{trace_id}] [human_intervention] "
-            f"等待人工确认 status=pending "
+            f"人工介入选择 mode={hitl_mode} "
             f"duration={time.time()*1000-start_ms}ms"
         )
-        return {"human_confirmation":user_confirmation}
+        return {
+            "hitl_mode":hitl_mode,
+            "human_edited_query":human_edited_query
+        }
 
     async def rewrite_query_node(state:AgentState)->dict:
         """
-        简化查询改写节点
+        Agent 改写节点（状态层面）
 
         职责：
-        1. 增加重试计数
-        2. 保留原始 query（改写由多路召回服务自动处理）
+        1. 基于当前 query 和检索结果生成新的 query
+        2. 增加重试计数
+        3. 更新 state 中的 current_query
 
         流程：
-        self_rag评分低 → rewrite_query_node(只加计数) → assistant → rag_search(多路召回自动处理)
+        self_rag评分中等 → rewrite_query_node(改写query) → assistant → rag_search(多路召回)
         """
         retry=(state.get("retry_count") or 0)+1
         original=state.get("current_query") or ""
 
+        # 获取上一轮检索结果作为参考
+        rag_result=get_last_tool_result(state["messages"],"rag_search") or {}
+        docs=rag_result.get("docs") or []
+        docs_text="\n".join(d.get("text","")[:200] for d in docs[:3])
+
+        current_query=original
+        try:
+            prompt=QUERY_REWRITE_PROMPT.format(
+                original_query=original,
+                result_summary=docs_text
+            )
+            resp=await get_llm(temperature=0.3).ainvoke(prompt)
+            new_query=str(resp.content).strip()
+            if new_query:
+                current_query=new_query
+            logger.info(
+                f"[trace:{state.get('trace_id')}] [rewrite_query_node] "
+                f"Agent改写完成 retry={retry} "
+                f"original='{original[:30]}' new='{current_query[:30]}'"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[trace:{state.get('trace_id')}] [rewrite_query_node] "
+                f"改写失败，使用原始查询 retry={retry} error={e}"
+            )
+
+        return {"retry_count":retry,"current_query":current_query}
+
+    async def edit_query_node(state:AgentState)->dict:
+        """
+        人工修改query节点
+
+        处理人工介入时用户修改的query：
+        - 更新 current_query
+        - 不递增 retry_count（人工修改不计入自动重试）
+        - 保留全部状态
+        """
+        trace_id=state.get("trace_id","")
+        human_edited_query=state.get("human_edited_query")
+        original_query=state.get("current_query") or ""
+
+        # 优先使用人工编辑的query，否则保留原query
+        new_query=human_edited_query if human_edited_query else original_query
+
         logger.info(
-            f"[trace:{state.get('trace_id')}] [rewrite_query_node] "
-            f"重试计数+1 retry={retry} query='{original[:50]}' "
-            f"(改写由多路召回服务自动处理)"
+            f"[trace:{trace_id}] [edit_query_node] "
+            f"人工修改query original='{original_query[:30]}' "
+            f"new='{new_query[:30]}'"
         )
-
-        return {"retry_count":retry,"current_query":original}
-
-    def human_review_reset_node(state:AgentState)->dict:
-        return {"human_confirmation":None,"self_rag_score":0.5}
+        return {
+            "current_query":new_query,
+            "human_edited_query":None,  # 清除临时字段
+            "hitl_mode":None  # 清除临时字段
+        }
 
     async def compress_node(state:AgentState)->dict:
         start_ms=time.time()*1000
@@ -413,7 +515,7 @@ def create_node(tools):
         "answer": answer_node,
         "human_intervention": human_intervention_node,
         "rewrite_query": rewrite_query_node,
-        "human_review_reset": human_review_reset_node,
+        "edit_query": edit_query_node,
         "compress": compress_node,
     }
 

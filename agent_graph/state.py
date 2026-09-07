@@ -17,6 +17,13 @@ class AgentState(MessagesState):
 
     retry_count:int=0
 
+    # HITL: 人工介入模式 ("edit_query" | "force_answer")
+    hitl_mode:Optional[str]
+
+    # HITL: 人工修改后的query
+    human_edited_query:Optional[str]
+
+    # HITL: 人工确认结果（保留兼容）
     human_confirmation:Optional[Dict[str,Any]]
 
     trace_id:Optional[str]

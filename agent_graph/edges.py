@@ -54,9 +54,13 @@ def compress_router(state:AgentState)->Literal["compress","end"]:
         return "compress"
     return "end"
 
-def human_review_router(state:AgentState)->Literal["reset_and_retry","end"]:
-    confirmation=state.get("human_confirmation") or {}
-    status=confirmation.get("status","pending")
-    if status=="confirmed":
-        return "reset_and_retry"
-    return "end"
+def human_review_router(state:AgentState)->Literal["edit_query","answer"]:
+    """
+    HITL路由：简化设计
+    - edit_query: 人工修改query后继续检索
+    - answer: 直接生成回答（跳过检索）
+    """
+    hitl_mode=state.get("hitl_mode") or "edit_query"
+    if hitl_mode=="edit_query":
+        return "edit_query"
+    return "answer"
