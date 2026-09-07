@@ -6,7 +6,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.types import interrupt
 from loguru import logger
-
+from langgraph.types import Command
 from agent_graph.state import AgentState
 
 
@@ -86,7 +86,6 @@ class AgentService:
                 content=f"[人工回答] {answer}",
             )
 
-        from langgraph.types import Command
 
         config = {
             "recursion_limit": 50,

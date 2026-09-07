@@ -28,3 +28,4 @@ test/
 *.html
 data/
 tests/
+.docker

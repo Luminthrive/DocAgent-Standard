@@ -12,9 +12,9 @@ class HumanReviewRequest(BaseModel):
 
 
 class RagSearchInput(BaseModel):
-    query:str=Field(description="检索查询文本")
-    kb_id:Optional[str]=Field(default=None,description="知识库id,不指定使用默认知识库")
-    top_k:int =Field(default=5,description="返回文档数量，默认是5")
+    query:str=Field(description="用户的检索查询，用于在知识库中搜索相关文档。请将用户问题转化为适合检索的查询文本")
+    kb_id:Optional[str]=Field(default=None,description="知识库ID。如果用户明确指定了某个知识库，请传入对应ID；否则留空使用默认知识库")
+    top_k:int =Field(default=5,description="返回文档数量。简单问题用3-5条，复杂问题或需要更多上下文时用8-10条")
 
 
 

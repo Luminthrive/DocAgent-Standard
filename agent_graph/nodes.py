@@ -2,8 +2,7 @@ import json
 import time
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import interrupt
-from agent_graph.prompts import ASSISTANT_PROMPT, ANSWER_PROMPT, HUMAN_CONFIRMATION_PROMPT, QUERY_REWRITE_PROMPT, \
-    COMPRESS_SUMMARY_PROMPT
+from agent_graph.prompts import ASSISTANT_PROMPT, ANSWER_PROMPT, HUMAN_CONFIRMATION_PROMPT, COMPRESS_SUMMARY_PROMPT
 from agent_graph.state import AgentState
 from loguru import logger
 from agent_graph.util import build_context, get_llm, get_last_user_message, get_last_tool_result
@@ -185,42 +184,105 @@ def create_node(tools):
         }
 
     def self_rag_node(state:AgentState)->dict:
+        """
+        Self-RAG 混合信号融合评分策略
+        主信号: Reranker 分数 (权重 50%)
+        辅助信号:
+          - 文档覆盖度 (权重 25%): 多个 chunk 命中同一主题
+          - 重试次数惩罚 (权重 15%): 重试越多，分数越低
+          - 文档数量奖励 (权重 10%): 有效文档越多越好
+        """
         start_ms=time.time()*1000
         trace_id=state.get("trace_id","")
         rag_result=get_last_tool_result(state["messages"],"rag_search") or {}
         docs=rag_result.get("docs") or []
         query=state.get("current_query") or ""
+        retry_count=state.get("retry_count") or 0
 
         if not docs:
-            self_rag_score=0.0
-        else:
-            scores=[]
+            return {"self_rag_score":0.0}
+
+        # ═══════════════════════════════════════════════════════════
+        # 信号1: Reranker 分数 (主信号，权重 50%)
+        # ═══════════════════════════════════════════════════════════
+        rerank_scores=[doc.get("rerank_score",0) for doc in docs]
+        # 归一化到 [0, 1] (rerank score 通常是 logits，范围约 [-10, 10])
+        import math
+        normalized_rerank=[1/(1+math.exp(-s)) for s in rerank_scores]
+        avg_rerank=sum(normalized_rerank)/len(normalized_rerank) if normalized_rerank else 0
+
+        # ═══════════════════════════════════════════════════════════
+        # 信号2: 文档覆盖度 (权重 25%)
+        # 衡量多个 chunk 是否命中同一主题，而不是孤证
+        # ═══════════════════════════════════════════════════════════
+        def compute_coverage(docs, query):
+            """计算文档覆盖度：基于文档来源多样性和内容重叠"""
+            if len(docs) <= 1:
+                return 0.3  # 只有一个文档，覆盖度较低
+
+            # 统计不同文档来源
+            doc_ids=set()
+            file_names=set()
+            for doc in docs:
+                meta=doc.get("metadata",{})
+                if meta.get("doc_id"):
+                    doc_ids.add(meta["doc_id"])
+                if meta.get("file_name"):
+                    file_names.add(meta["file_name"])
+
+            # 来源多样性: 来自不同文档/文件越多越好
+            source_diversity=min(1.0, (len(doc_ids)*0.5+len(file_names)*0.5)/3)
+
+            # 内容重叠: 多个文档包含相似关键词
             query_words=set(query.lower().split())
+            overlap_counts=0
             for doc in docs:
                 text=doc.get("text","")[:500].lower()
-                overlap=len(query_words & set(text.split()))/max(len(query_words),1)
-                vec_score=doc.get("score",0.5)
-                doc_score=overlap*0.3+vec_score*0.7
-                scores.append(doc_score)
-            self_rag_score=sum(scores)/len(scores) if scores else 0.0
+                doc_words=set(text.split())
+                if len(query_words & doc_words) > 0:
+                    overlap_counts+=1
+            content_coverage=overlap_counts/len(docs) if docs else 0
 
-        score=round(self_rag_score,3)
-        logger.info(
-            f"[trace:{trace_id}] [self_rag_node] "
-            f"评分完成 score={score} docs={len(docs)} "
-            f"duration={time.time()*1000-start_ms}ms"
+            return source_diversity*0.6+content_coverage*0.4
+
+        coverage=compute_coverage(docs,query)
+
+        # ═══════════════════════════════════════════════════════════
+        # 信号3: 重试次数惩罚 (权重 15%)
+        # 重试越多，分数越低，防止无限循环
+        # ═══════════════════════════════════════════════════════════
+        max_retries=config.max_self_rag_retries
+        retry_penalty=max(0, 1.0-(retry_count/max_retries)*0.8)
+
+        # ═══════════════════════════════════════════════════════════
+        # 信号4: 文档数量奖励 (权重 10%)
+        # 有效文档越多，信息越充分
+        # ═══════════════════════════════════════════════════════════
+        effective_docs=sum(1 for s in normalized_rerank if s>0.3)
+        doc_count_score=min(1.0, effective_docs/3)
+
+        # ═══════════════════════════════════════════════════════════
+        # 加权融合
+        # ═══════════════════════════════════════════════════════════
+        final_score=(
+            avg_rerank*0.50+           # Reranker 主信号
+            coverage*0.25+             # 文档覆盖度
+            retry_penalty*0.15+        # 重试惩罚
+            doc_count_score*0.10       # 文档数量
         )
 
-        if score < 0.3:
-            decision = "human_intervention"
-        elif score < 0.5:
-            decision = "rewrite_query"
-        else:
-            decision = "answer"
+        score=round(final_score,4)
 
+        # ═══════════════════════════════════════════════════════════
+        # 详细日志
+        # ═══════════════════════════════════════════════════════════
         logger.info(
             f"[trace:{trace_id}] [self_rag_node] "
-            f"决策={decision} score={score}"
+            f"混合评分: final={score} "
+            f"rerank={avg_rerank:.3f} coverage={coverage:.3f} "
+            f"retry_penalty={retry_penalty:.3f} doc_count={doc_count_score:.3f} "
+            f"docs={len(docs)} retry={retry_count} "
+            f"duration={time.time()*1000-start_ms}ms"
         )
 
         return {"self_rag_score":score}
@@ -254,8 +316,10 @@ def create_node(tools):
             context_parts=[]
             for i,doc in enumerate(docs[:3],1):
                 text=doc.get("text","")[:300]
-                score=doc.get("score",0)
-                context_parts.append(f"[{i}] (相关度:{score:.2f}) {text}")
+                # 优先使用 rerank_score，降级到 score
+                score=doc.get("rerank_score") or doc.get("score",0)
+                score_label="rerank" if doc.get("rerank_score") is not None else "vec"
+                context_parts.append(f"[{i}] ({score_label}:{score:.2f}) {text}")
             context="\n".join(context_parts)
         else:
             context="未检索到相关文档"
@@ -280,37 +344,26 @@ def create_node(tools):
         return {"human_confirmation":user_confirmation}
 
     async def rewrite_query_node(state:AgentState)->dict:
+        """
+        简化查询改写节点
+
+        职责：
+        1. 增加重试计数
+        2. 保留原始 query（改写由多路召回服务自动处理）
+
+        流程：
+        self_rag评分低 → rewrite_query_node(只加计数) → assistant → rag_search(多路召回自动处理)
+        """
         retry=(state.get("retry_count") or 0)+1
-        rag_result=get_last_tool_result(state["messages"],"rag_search") or {}
+        original=state.get("current_query") or ""
 
-        original=state["current_query"]
-        docs = rag_result.get("docs") or []
-        docs_text = "\n".join(
-            d.get("text", "")[:200]
-            for d in docs[:3]
+        logger.info(
+            f"[trace:{state.get('trace_id')}] [rewrite_query_node] "
+            f"重试计数+1 retry={retry} query='{original[:50]}' "
+            f"(改写由多路召回服务自动处理)"
         )
-        prompt=QUERY_REWRITE_PROMPT.format(
-            original_query=original,
-            result_summary=docs_text
-        )
-        current_query=original
-        try:
-            resp=await get_llm(temperature=0.3).ainvoke(prompt)
-            new_query=str(resp.content).strip()
-            if new_query:
-                current_query=new_query
-            logger.info(
-                f"[trace:{state.get('trace_id')}] [rewrite_query_node] "
-                f"查询改写完成 retry={retry} "
-                f"new_query='{current_query[:50]}'"
-            )
-        except Exception:
-            logger.warning(
-                f"[trace:{state.get('trace_id')}] [rewrite_query_node] "
-                f"查询改写失败，使用原始查询 retry={retry}"
-            )
 
-        return {"retry_count":retry,"current_query":current_query}
+        return {"retry_count":retry,"current_query":original}
 
     def human_review_reset_node(state:AgentState)->dict:
         return {"human_confirmation":None,"self_rag_score":0.5}
