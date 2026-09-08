@@ -13,7 +13,7 @@ from services.parsers.metadata_utils import build_base_metadata
 class PPTXParser(BaseParser):
     """PPT 解析器 — 每张幻灯片一个 chunk"""
 
-    def parse(self, file_path: str) -> List[Document]:
+    async def parse(self, file_path: str) -> List[Document]:
         prs = Presentation(file_path)
         docs = []
 
@@ -63,7 +63,3 @@ class PPTXParser(BaseParser):
 
         logger.info(f"PPTX 解析完成: {len(docs)} slides")
         return docs
-
-    def get_splitter(self):
-        """PPT 不使用 LangChain TextSplitter"""
-        return None

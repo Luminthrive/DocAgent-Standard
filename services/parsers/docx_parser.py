@@ -29,7 +29,7 @@ class DocxParser(BaseParser):
     _HEADING_CATEGORIES = {"Title", "Heading", "Subheading"}
     _TABLE_CATEGORIES = {"Table"}
 
-    def parse(self, file_path: str) -> List[Document]:
+    async def parse(self, file_path: str) -> List[Document]:
         loader = UnstructuredWordDocumentLoader(file_path, mode="elements")
         docs = loader.load()
 
@@ -88,10 +88,6 @@ class DocxParser(BaseParser):
 
         logger.info(f"DOCX 解析完成: {len(final_chunks)} chunks (含 {len(table_chunks)} 个表格)")
         return final_chunks
-
-    def get_splitter(self):
-        """parse() 已完成全部分块"""
-        return None
 
     @staticmethod
     def _handle_table(

@@ -17,7 +17,7 @@ ROWS_PER_CHUNK = 50
 class ExcelParser(BaseParser):
     """Excel 解析器 — 每个 Sheet 独立处理，大表按行分块"""
 
-    def parse(self, file_path: str) -> List[Document]:
+    async def parse(self, file_path: str) -> List[Document]:
         docs = []
         xls = pd.ExcelFile(file_path)
         sheet_names = xls.sheet_names
@@ -89,7 +89,3 @@ class ExcelParser(BaseParser):
         for _, row in df.iterrows():
             lines.append(" | ".join(str(v) for v in row.values))
         return "\n".join(lines)
-
-    def get_splitter(self):
-        """Excel 不使用 LangChain TextSplitter"""
-        return None

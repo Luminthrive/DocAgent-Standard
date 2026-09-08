@@ -42,9 +42,6 @@ _OCR_PROMPT = (
 # 懒加载的 Vision LLM 实例
 _vision_llm: ChatOpenAI | None = None
 
-# 全局 OCR 并发信号量
-_ocr_semaphore: asyncio.Semaphore | None = None
-
 
 def _get_vision_llm() -> ChatOpenAI:
     """懒加载 Vision LLM（避免未配置时报错）"""
@@ -75,15 +72,16 @@ def _render_page(file_path: str, page_num: int) -> bytes:
 
 
 async def _ocr_page_with_retry(file_path: str, page_num: int, semaphore: asyncio.Semaphore) -> str:
-    """渲染 PDF 页面为图片 → 调 Vision LLM 识别文字（带并发控制和指数退避重试）"""
+    """渲染 PDF 页面为图片 -> 调 Vision LLM 识别文字（带并发控制和指数退避重试）"""
     if not config.vision_api_key:
         logger.warning("VISION_API_KEY 未配置，跳过 Vision OCR")
         return ""
 
     # 渲染页面（同步操作，放到线程池避免阻塞事件循环）
     try:
-        loop = asyncio.get_event_loop()
-        img_bytes = await loop.run_in_executor(None, _render_page, file_path, page_num)
+        img_bytes = await asyncio.get_running_loop().run_in_executor(
+            None, _render_page, file_path, page_num
+        )
         if not img_bytes:
             return ""
     except Exception as e:
@@ -95,11 +93,10 @@ async def _ocr_page_with_retry(file_path: str, page_num: int, semaphore: asyncio
         img_b64 = base64.b64encode(img_bytes).decode("utf-8")
         llm = _get_vision_llm()
 
-        last_error = None
         for attempt in range(OCR_MAX_RETRIES):
             try:
                 # Vision LLM 调用（同步，放到线程池）
-                response = await loop.run_in_executor(
+                response = await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda: llm.invoke([
                         HumanMessage(content=[
@@ -112,7 +109,6 @@ async def _ocr_page_with_retry(file_path: str, page_num: int, semaphore: asyncio
                 )
                 return response.content.strip()
             except Exception as e:
-                last_error = e
                 if attempt < OCR_MAX_RETRIES - 1:
                     delay = OCR_BASE_RETRY_DELAY * (2 ** attempt)
                     logger.warning(f"Vision OCR 失败 (page={page_num}, attempt {attempt+1}/{OCR_MAX_RETRIES}): {e}, {delay:.1f}s 后重试")
@@ -124,9 +120,9 @@ async def _ocr_page_with_retry(file_path: str, page_num: int, semaphore: asyncio
 
 @register_parser(".pdf")
 class PDFParser(BaseParser):
-    """PDF 解析器 — 一级按页切分，二级递归分割超长页，图片型调 Vision OCR（并发+重试）"""
+    """PDF 解析器 - 一级按页切分，二级递归分割超长页，图片型调 Vision OCR（并发+重试）"""
 
-    def parse(self, file_path: str) -> List[Document]:
+    async def parse(self, file_path: str) -> List[Document]:
         loader = PyPDFLoader(file_path)
         docs = loader.load()
 
@@ -150,7 +146,6 @@ class PDFParser(BaseParser):
             if is_ocr:
                 logger.info(f"PDF 图片型页面: page={page_num}, text_len={text_len}，标记为 OCR")
                 ocr_tasks.append((page_num, chunk_idx))
-                # 先用空文本占位，OCR 完成后回填
                 text = ""
 
             meta = build_base_metadata(
@@ -167,28 +162,13 @@ class PDFParser(BaseParser):
 
         # 并发执行 OCR（带信号量限流 + 指数退避重试）
         if ocr_tasks:
-            global _ocr_semaphore
-            _ocr_semaphore = asyncio.Semaphore(OCR_SEMAPHORE_LIMIT)
+            semaphore = asyncio.Semaphore(OCR_SEMAPHORE_LIMIT)
             logger.info(f"开始并发 OCR: {len(ocr_tasks)} 页, 并发限制={OCR_SEMAPHORE_LIMIT}")
 
-            async def run_ocr_tasks():
-                tasks = [
-                    _ocr_page_with_retry(file_path, page_num, _ocr_semaphore)
-                    for page_num, _ in ocr_tasks
-                ]
-                return await asyncio.gather(*tasks)
-
-            # 在异步上下文中运行 OCR
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # 已在异步上下文中，直接 await
-                    ocr_results = loop.run_until_complete(run_ocr_tasks())
-                else:
-                    ocr_results = asyncio.run(run_ocr_tasks())
-            except RuntimeError:
-                # 如果没有事件循环，创建一个新的
-                ocr_results = asyncio.run(run_ocr_tasks())
+            ocr_results = await asyncio.gather(*[
+                _ocr_page_with_retry(file_path, page_num, semaphore)
+                for page_num, _ in ocr_tasks
+            ])
 
             # 回填 OCR 结果
             for (page_num, chunk_idx), ocr_text in zip(ocr_tasks, ocr_results):
@@ -208,7 +188,3 @@ class PDFParser(BaseParser):
             c.metadata["total_chunks"] = total
 
         return final_chunks
-
-    def get_splitter(self):
-        """parse() 已完成全部分块"""
-        return None

@@ -6,7 +6,6 @@ from sqlalchemy import select, delete
 
 from db.models import Document, Chunk, KnowledgeBase
 from config import config
-from services.parsers import get_parser
 
 
 class DocumentService:
@@ -28,14 +27,6 @@ class DocumentService:
             "error_msg": row.error_msg,
             "created_at": row.created_at,
         }
-
-    @staticmethod
-    def chunk_split(paragraphs, splitter=None):
-        """分块：splitter 为 None 表示解析器已自行完成分块，不再二次切分"""
-        if splitter is None:
-            return paragraphs
-        chunks = splitter.split_documents(paragraphs)
-        return chunks
 
     @staticmethod
     def _post_process_chunks(chunks, file_path: str, file_type: str):
@@ -85,9 +76,9 @@ class DocumentService:
             await db_session.flush()
             doc_id = doc.id
 
-            # 3 解析文档 → 获取 Document 列表（每个 Document 已携带元数据）
+            # 3 解析文档 → 获取最终分块结果
             try:
-                paragraphs = await self.parse_service.parse_document(str(file_path), file_type)
+                chunks = await self.parse_service.parse_document(str(file_path), file_type)
             except ValueError as e:
                 doc.status = "failed"
                 doc.error_msg = str(e)
@@ -95,26 +86,14 @@ class DocumentService:
                 return {"doc_id": str(doc_id), "file_name": file.filename,
                         "status": "failed", "message": doc.error_msg}
 
-            if not paragraphs:
+            if not chunks:
                 doc.status = "failed"
                 doc.error_msg = "文档解析为空，暂不支持该类型"
                 await db_session.commit()
                 return {"doc_id": str(doc_id), "file_name": file.filename,
                         "status": "failed", "message": doc.error_msg}
 
-            # 4 分块：使用解析器提供的专用分块器
-            parser = get_parser(file_type)
-            splitter = parser.get_splitter()
-            chunks = self.chunk_split(paragraphs, splitter)
-
-            if not chunks:
-                doc.status = "failed"
-                doc.error_msg = "文档分块为空"
-                await db_session.commit()
-                return {"doc_id": str(doc_id), "file_name": file.filename,
-                        "status": "failed", "message": doc.error_msg}
-
-            # 4.5 分块后补算 offset / location_ref（对分块器产出的 chunk）
+            # 4 分块后补算 offset / location_ref（对分块器产出的 chunk）
             self._post_process_chunks(chunks, str(file_path), file_type)
 
             # 5 注入 doc_id / chunk_id，提取 _parsed_raw，组装 Qdrant payload

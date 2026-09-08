@@ -31,7 +31,7 @@ _SECONDARY_SPLITTER = RecursiveCharacterTextSplitter(
 class MarkdownParser(BaseParser):
     """Markdown 解析器 — 一级按标题层级切分，二级按长度细分"""
 
-    def parse(self, file_path: str) -> List[Document]:
+    async def parse(self, file_path: str) -> List[Document]:
         loader = TextLoader(file_path, encoding="utf-8")
         docs = loader.load()
 
@@ -75,7 +75,3 @@ class MarkdownParser(BaseParser):
             c.metadata["total_chunks"] = total
 
         return final
-
-    def get_splitter(self):
-        """parse() 已完成全部分块"""
-        return None
