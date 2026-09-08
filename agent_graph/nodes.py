@@ -185,25 +185,22 @@ def create_node(tools):
 
     def self_rag_node(state:AgentState)->dict:
         """
-        Self-RAG 混合信号融合评分策略
-        主信号: Reranker 分数 (权重 50%)
-        辅助信号:
-          - 文档覆盖度 (权重 25%): 多个 chunk 命中同一主题
-          - 重试次数惩罚 (权重 15%): 重试越多，分数越低
-          - 文档数量奖励 (权重 10%): 有效文档越多越好
+        Self-RAG 三维融合评分策略
+        - Reranker 分数 (60%): 检索结果与查询的相关性
+        - 多源有效文档 (25%): 有效文档占总文档的比例
+        - 内容覆盖度 (15%): chunk 与查询的关键词匹配度
         """
         start_ms=time.time()*1000
         trace_id=state.get("trace_id","")
         rag_result=get_last_tool_result(state["messages"],"rag_search") or {}
         docs=rag_result.get("docs") or []
         query=state.get("current_query") or ""
-        retry_count=state.get("retry_count") or 0
 
         if not docs:
             return {"self_rag_score":0.0}
 
         # ═══════════════════════════════════════════════════════════
-        # 信号1: Reranker 分数 (主信号，权重 50%)
+        # 信号1: Reranker 分数 (主信号，权重 60%)
         # ═══════════════════════════════════════════════════════════
         rerank_scores=[doc.get("rerank_score",0) for doc in docs]
         # 归一化到 [0, 1] (rerank score 通常是 logits，范围约 [-10, 10])
@@ -212,63 +209,71 @@ def create_node(tools):
         avg_rerank=sum(normalized_rerank)/len(normalized_rerank) if normalized_rerank else 0
 
         # ═══════════════════════════════════════════════════════════
-        # 信号2: 文档覆盖度 (权重 25%)
-        # 衡量多个 chunk 是否命中同一主题，而不是孤证
+        # 信号2: 多源有效文档 (权重 25%)
+        # 来自多少篇不同文档，且 Reranker 分数超过阈值
         # ═══════════════════════════════════════════════════════════
-        def compute_coverage(docs, query):
-            """计算文档覆盖度：基于文档来源多样性和内容重叠"""
-            if len(docs) <= 1:
-                return 0.3  # 只有一个文档，覆盖度较低
+        def compute_multi_source_effective(docs, normalized_rerank):
+            """计算多源有效文档数：有效文档占总文档的比例"""
+            if not docs:
+                return 0.0
 
-            # 统计不同文档来源
             doc_ids=set()
-            file_names=set()
-            for doc in docs:
+            effective_doc_ids=set()
+
+            for doc, score in zip(docs, normalized_rerank):
                 meta=doc.get("metadata",{})
-                if meta.get("doc_id"):
-                    doc_ids.add(meta["doc_id"])
-                if meta.get("file_name"):
-                    file_names.add(meta["file_name"])
+                doc_id=meta.get("doc_id")
+                if doc_id:
+                    doc_ids.add(doc_id)
+                    # 有效文档：Reranker 分数 > 0.3
+                    if score > 0.3:
+                        effective_doc_ids.add(doc_id)
 
-            # 来源多样性: 来自不同文档/文件越多越好
-            source_diversity=min(1.0, (len(doc_ids)*0.5+len(file_names)*0.5)/3)
+            return len(effective_doc_ids)/len(doc_ids) if doc_ids else 0.0
 
-            # 内容重叠: 多个文档包含相似关键词
-            query_words=set(query.lower().split())
-            overlap_counts=0
+        multi_source_score=compute_multi_source_effective(docs, normalized_rerank)
+
+        # ═══════════════════════════════════════════════════════════
+        # 信号3: 内容覆盖度 (权重 15%)
+        # 有多少 chunk 包含查询关键词
+        # ═══════════════════════════════════════════════════════════
+        import jieba
+        import re
+
+        def tokenize(text):
+            """中英文混合分词：jieba 切词 + 英文整词保留"""
+            tokens = set()
+            # 先用正则提取完整英文单词（如 FastAPI, API, Python）
+            for match in re.finditer(r'[a-zA-Z][a-zA-Z0-9_]+', text):
+                tokens.add(match.group().lower())
+            # jieba 切分中文
+            for word in jieba.cut(text):
+                word = word.strip().lower()
+                if word and len(word) > 1 and not word.isascii():
+                    tokens.add(word)
+            return tokens
+
+        def compute_content_coverage(docs, query):
+            query_words = tokenize(query)
+            if not query_words:
+                return 0
+            overlap_counts = 0
             for doc in docs:
-                text=doc.get("content",{}).get("chunk_text","")[:500].lower()
-                doc_words=set(text.split())
-                if len(query_words & doc_words) > 0:
-                    overlap_counts+=1
-            content_coverage=overlap_counts/len(docs) if docs else 0
+                text = doc.get("content", {}).get("chunk_text", "")[:500]
+                doc_words = tokenize(text)
+                if query_words & doc_words:
+                    overlap_counts += 1
+            return overlap_counts / len(docs) if docs else 0
 
-            return source_diversity*0.6+content_coverage*0.4
-
-        coverage=compute_coverage(docs,query)
+        content_coverage=compute_content_coverage(docs, query)
 
         # ═══════════════════════════════════════════════════════════
-        # 信号3: 重试次数惩罚 (权重 15%)
-        # 重试越多，分数越低，防止无限循环
-        # ═══════════════════════════════════════════════════════════
-        max_retries=config.max_self_rag_retries
-        retry_penalty=max(0, 1.0-(retry_count/max_retries)*0.8)
-
-        # ═══════════════════════════════════════════════════════════
-        # 信号4: 文档数量奖励 (权重 10%)
-        # 有效文档越多，信息越充分
-        # ═══════════════════════════════════════════════════════════
-        effective_docs=sum(1 for s in normalized_rerank if s>0.3)
-        doc_count_score=min(1.0, effective_docs/3)
-
-        # ═══════════════════════════════════════════════════════════
-        # 加权融合
+        # 加权融合（三维评分）
         # ═══════════════════════════════════════════════════════════
         final_score=(
-            avg_rerank*0.50+           # Reranker 主信号
-            coverage*0.25+             # 文档覆盖度
-            retry_penalty*0.15+        # 重试惩罚
-            doc_count_score*0.10       # 文档数量
+            avg_rerank*0.60+           # Reranker 主信号
+            multi_source_score*0.25+   # 多源有效文档
+            content_coverage*0.15      # 内容覆盖度
         )
 
         score=round(final_score,4)
@@ -279,9 +284,9 @@ def create_node(tools):
         logger.info(
             f"[trace:{trace_id}] [self_rag_node] "
             f"混合评分: final={score} "
-            f"rerank={avg_rerank:.3f} coverage={coverage:.3f} "
-            f"retry_penalty={retry_penalty:.3f} doc_count={doc_count_score:.3f} "
-            f"docs={len(docs)} retry={retry_count} "
+            f"rerank={avg_rerank:.3f} multi_source={multi_source_score:.3f} "
+            f"content_cov={content_coverage:.3f} "
+            f"docs={len(docs)} "
             f"duration={time.time()*1000-start_ms}ms"
         )
 
