@@ -1,4 +1,5 @@
 #向量处理服务 - 支持混合检索 (Dense + Sparse + RRF)
+import asyncio
 import uuid
 from typing import List, Dict, Any
 
@@ -24,29 +25,51 @@ class VectorService:
         self.client = vector_client
         self.model_server_url = config.model_server_url
         self.request_timeout = 60.0
+        # 分批配置：从环境变量读取，默认 64
+        self._batch_size = getattr(config, 'vector_batch_size', 64)
+        # 重试配置
+        self._max_retries = 3
+        self._base_retry_delay = 2.0
 
-    async def _encode(self, texts: List[str]) -> Dict[str, Any]:
+    async def _encode(self, texts: List[str], batch_idx: int = 0, total_batches: int = 1) -> Dict[str, Any]:
         """
         通过 BGE-M3 API 获取 Dense + Sparse 向量 (单次调用)
         返回: {"dense": List[List[float]], "sparse": List[Dict]}
+        自适应超时：根据批次大小动态调整超时时间
         """
-        async with httpx.AsyncClient(timeout=self.request_timeout) as client:
-            response = await client.post(
-                f"{self.model_server_url}/v1/embeddings",
-                json={"input": texts}
-            )
-            response.raise_for_status()
-            result = response.json()
+        # 自适应超时：基础超时 + 每 16 个文本增加 10s
+        adaptive_timeout = self.request_timeout + (len(texts) / 16) * 10.0
+        logger.debug(f"编码批次 {batch_idx+1}/{total_batches}: count={len(texts)}, timeout={adaptive_timeout:.1f}s")
 
-        dense_vecs = []
-        sparse_vecs = []
-        for item in result.get("data", []):
-            dense_vecs.append(item["embedding"])
-            sparse_vecs.append({
-                "indices": item["sparse_indices"],
-                "values": item["sparse_values"],
-            })
-        return {"dense": dense_vecs, "sparse": sparse_vecs}
+        last_error = None
+        for attempt in range(self._max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=adaptive_timeout) as client:
+                    response = await client.post(
+                        f"{self.model_server_url}/v1/embeddings",
+                        json={"input": texts}
+                    )
+                    response.raise_for_status()
+                    result = response.json()
+
+                dense_vecs = []
+                sparse_vecs = []
+                for item in result.get("data", []):
+                    dense_vecs.append(item["embedding"])
+                    sparse_vecs.append({
+                        "indices": item["sparse_indices"],
+                        "values": item["sparse_values"],
+                    })
+                return {"dense": dense_vecs, "sparse": sparse_vecs}
+            except Exception as e:
+                last_error = e
+                if attempt < self._max_retries - 1:
+                    delay = self._base_retry_delay * (2 ** attempt)
+                    logger.warning(f"编码失败 (attempt {attempt+1}/{self._max_retries}): {e}, {delay:.1f}s 后重试")
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(f"编码最终失败: {e}")
+                    raise
 
     async def ensure_collection(self):
         """创建集合 - 同时配置 dense 和 sparse vectors"""
@@ -116,7 +139,7 @@ class VectorService:
         file_name: str = "",
     ) -> List[str]:
         """
-        添加向量 — 同时写入 dense + sparse
+        添加向量 — 分批写入 dense + sparse，避免超大文档超时
         payloads: 每个元素是完整的 {"metadata": {...}, "content": {...}} 结构
         texts: 与 payloads 一一对应的 embedding 文本（即 content.chunk_text）
         """
@@ -124,31 +147,55 @@ class VectorService:
             return []
         await self.ensure_collection()
 
-        # BGE-M3 单次调用获取 Dense + Sparse
-        encoded = await self._encode(texts)
-        dense_vectors = encoded["dense"]
-        sparse_results = encoded["sparse"]
+        all_point_ids = []
+        total_batches = (len(texts) + self._batch_size - 1) // self._batch_size
 
-        point_ids = [str(uuid.uuid4()) for _ in texts]
-        points = []
-        for pid, text, dense, sparse, idx, payload in zip(
-            point_ids, texts, dense_vectors, sparse_results, range(len(texts)), payloads
-        ):
-            points.append(PointStruct(
-                id=pid,
-                vector={
-                    "dense": dense,
-                    "sparse": sparse,
-                },
-                payload=payload,  # 已是完整的 {metadata: {...}, content: {...}}
-            ))
+        for batch_idx in range(0, len(texts), self._batch_size):
+            batch_texts = texts[batch_idx:batch_idx + self._batch_size]
+            batch_payloads = payloads[batch_idx:batch_idx + self._batch_size]
 
-        await self.client.upsert(
-            collection_name=config.qdrant_collection,
-            points=points
-        )
-        logger.info(f"混合向量入库: count={len(points)}")
-        return point_ids
+            # BGE-M3 编码（带自适应超时和重试）
+            encoded = await self._encode(batch_texts, batch_idx // self._batch_size + 1, total_batches)
+            dense_vectors = encoded["dense"]
+            sparse_results = encoded["sparse"]
+
+            point_ids = [str(uuid.uuid4()) for _ in batch_texts]
+            points = []
+            for pid, text, dense, sparse, idx, payload in zip(
+                point_ids, batch_texts, dense_vectors, sparse_results, range(len(batch_texts)), batch_payloads
+            ):
+                points.append(PointStruct(
+                    id=pid,
+                    vector={
+                        "dense": dense,
+                        "sparse": sparse,
+                    },
+                    payload=payload,  # 已是完整的 {metadata: {...}, content: {...}}
+                ))
+
+            # upsert 带重试
+            last_error = None
+            for attempt in range(self._max_retries):
+                try:
+                    await self.client.upsert(
+                        collection_name=config.qdrant_collection,
+                        points=points
+                    )
+                    break
+                except Exception as e:
+                    last_error = e
+                    if attempt < self._max_retries - 1:
+                        delay = self._base_retry_delay * (2 ** attempt)
+                        logger.warning(f"upsert 失败 (batch {batch_idx//self._batch_size+1}, attempt {attempt+1}): {e}, {delay:.1f}s 后重试")
+                        await asyncio.sleep(delay)
+                    else:
+                        raise
+
+            all_point_ids.extend(point_ids)
+            logger.info(f"混合向量入库: batch={batch_idx//self._batch_size+1}/{total_batches}, count={len(points)}")
+
+        logger.info(f"混合向量入库完成: total={len(all_point_ids)}")
+        return all_point_ids
 
     async def delete_by_doc_id(self, kb_id: str, doc_id: str) -> int:
         q_filter = Filter(must=[FieldCondition(key="metadata.doc_id", match=MatchValue(value=doc_id))])

@@ -48,3 +48,9 @@ langgraph_checkpoint_ttl=604800
 vision_model=os.getenv("VISION_MODEL","mimo-v2.5pro")
 vision_api_url=os.getenv("VISION_API_URL") or llm_base_url
 vision_api_key=os.getenv("VISION_API_KEY") or llm_api_key
+
+# 向量入库分批配置
+vector_batch_size=int(os.getenv("VECTOR_BATCH_SIZE","64"))
+
+# OCR 并发控制配置
+ocr_concurrency_limit=int(os.getenv("OCR_CONCURRENCY_LIMIT","3"))
