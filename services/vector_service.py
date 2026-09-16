@@ -74,7 +74,7 @@ class VectorService:
     async def ensure_collection(self):
         """创建集合 - 同时配置 dense 和 sparse vectors"""
         if not await self.client.collection_exists(config.qdrant_collection):
-            self.client.create_collection(
+            await self.client.create_collection(
                 collection_name=config.qdrant_collection,
                 # Dense vectors 配置
                 vectors_config={

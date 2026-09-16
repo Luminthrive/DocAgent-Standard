@@ -29,7 +29,7 @@ class DocxParser(BaseParser):
     _HEADING_CATEGORIES = {"Title", "Heading", "Subheading"}
     _TABLE_CATEGORIES = {"Table"}
 
-    async def parse(self, file_path: str) -> List[Document]:
+    def _parse_sync(self, file_path: str) -> List[Document]:
         loader = UnstructuredWordDocumentLoader(file_path, mode="elements")
         docs = loader.load()
 

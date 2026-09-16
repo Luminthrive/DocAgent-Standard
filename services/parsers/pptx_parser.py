@@ -13,7 +13,7 @@ from services.parsers.metadata_utils import build_base_metadata
 class PPTXParser(BaseParser):
     """PPT 解析器 — 每张幻灯片一个 chunk"""
 
-    async def parse(self, file_path: str) -> List[Document]:
+    def _parse_sync(self, file_path: str) -> List[Document]:
         prs = Presentation(file_path)
         docs = []
 

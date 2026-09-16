@@ -124,7 +124,7 @@ class PDFParser(BaseParser):
 
     async def parse(self, file_path: str) -> List[Document]:
         loader = PyPDFLoader(file_path)
-        docs = loader.load()
+        docs = await asyncio.to_thread(loader.load)
 
         # 提取 PDF 级元信息
         pdf_title = ""
@@ -179,7 +179,7 @@ class PDFParser(BaseParser):
                     logger.warning(f"Vision OCR 未返回内容: page={page_num}")
 
         # 二级：递归分割（短页不受影响，超长页自动切分）
-        final_chunks = _SECONDARY_SPLITTER.split_documents(page_chunks)
+        final_chunks = await asyncio.to_thread(_SECONDARY_SPLITTER.split_documents, page_chunks)
 
         # 回填 chunk_index 和 total_chunks
         total = len(final_chunks)

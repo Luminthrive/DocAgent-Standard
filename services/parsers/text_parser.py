@@ -20,7 +20,7 @@ _SECONDARY_SPLITTER = RecursiveCharacterTextSplitter(
 class TextParser(BaseParser):
     """纯文本解析器 — 按段落加载，递归字符分块"""
 
-    async def parse(self, file_path: str) -> List[Document]:
+    def _parse_sync(self, file_path: str) -> List[Document]:
         loader = TextLoader(file_path, encoding="utf-8")
         docs = loader.load()
 

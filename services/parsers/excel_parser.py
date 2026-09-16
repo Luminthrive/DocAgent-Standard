@@ -17,7 +17,7 @@ ROWS_PER_CHUNK = 50
 class ExcelParser(BaseParser):
     """Excel 解析器 — 每个 Sheet 独立处理，大表按行分块"""
 
-    async def parse(self, file_path: str) -> List[Document]:
+    def _parse_sync(self, file_path: str) -> List[Document]:
         docs = []
         xls = pd.ExcelFile(file_path)
         sheet_names = xls.sheet_names

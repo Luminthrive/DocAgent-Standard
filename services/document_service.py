@@ -1,4 +1,5 @@
 # 文档处理服务
+import asyncio
 from typing import Dict, Any, List
 
 from loguru import logger
@@ -51,14 +52,19 @@ class DocumentService:
 
             offset += text_len
 
+    @staticmethod
+    def _write_file(file_path, content: bytes):
+        """写盘丢线程池执行，避免大文件写盘阻塞事件循环"""
+        with open(file_path, "wb") as f:
+            f.write(content)
+
     async def upload_document(self, kb_id, file, user_id):
         # 1 保存文件到磁盘
         kb_dir = config.knowledge_base_dir / str(kb_id)
         kb_dir.mkdir(parents=True, exist_ok=True)
         file_path = kb_dir / file.filename
         content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(content)
+        await asyncio.to_thread(self._write_file, file_path, content)
         logger.info(f"保存文件: {file_path} size={len(content)}")
         file_type = "." + file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
 
@@ -93,8 +99,8 @@ class DocumentService:
                 return {"doc_id": str(doc_id), "file_name": file.filename,
                         "status": "failed", "message": doc.error_msg}
 
-            # 4 分块后补算 offset / location_ref（对分块器产出的 chunk）
-            self._post_process_chunks(chunks, str(file_path), file_type)
+            # 4 分块后补算 offset / location_ref（对分块器产出的 chunk，CPU 循环丢线程池）
+            await asyncio.to_thread(self._post_process_chunks, chunks, str(file_path), file_type)
 
             # 5 注入 doc_id / chunk_id，提取 _parsed_raw，组装 Qdrant payload
             doc_id_str = f"doc_{doc_id}"
