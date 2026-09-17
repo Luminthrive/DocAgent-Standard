@@ -4,6 +4,7 @@ agent_graph.prompts — Prompt 模板定义
 所有 Agent 行为的 Prompt 集中管理：
     - AGENT_DECISION_PROMPT: assistant 节点决策
     - RAG_ANSWER_PROMPT: 最终回答生成
+    - RAG_ANSWER_WITH_DOCS_PROMPT: 最终回答生成（带检索文档充分性自判）
     - QUERY_REWRITE_PROMPT: 查询改写
     - HUMAN_CONFIRMATION_PROMPT: 人工确认
     - COMPRESS_SUMMARY_PROMPT: 对话压缩
@@ -25,6 +26,25 @@ RAG_ANSWER_PROMPT = """基于以下信息回答用户问题（请务必参考"�
 {query}
 
 请给出清晰、有条理的回答。如果信息不足,说明无法回答。绝对不要编造未发生的事实。"""
+
+RAG_ANSWER_WITH_DOCS_PROMPT = """基于以下信息回答用户问题（请务必参考"对话历史"理解代词指代）:
+
+【业务上下文】
+{history}
+
+【对话历史】
+请参考下方完整的对话记录，包括工具调用和返回结果。其中最近一次 rag_search 返回的文档是本次回答的依据。
+
+用户问题:
+{query}
+
+请先判断检索到的文档是否足以回答用户问题，并通过结构化输出字段返回结果：
+- sufficient：文档足以回答为 true，不足为 false
+- answer：sufficient 为 true 时填写正式回答；为 false 时只填写一两句话说明缺少什么信息
+
+【硬性约束】
+- 严格依据文档内容回答，绝对不要编造文档中不存在的事实
+- 文档不足以回答时，如实将 sufficient 置为 false，不要强行作答"""
 
 AGENT_DECISION_PROMPT = """你是一个智能文档助手。
 
@@ -90,6 +110,10 @@ QUERY_REWRITE_PROMPT = """根据以下检索结果，改写用户问题以提高
 
 ANSWER_PROMPT = ChatPromptTemplate.from_messages([
     ("system", RAG_ANSWER_PROMPT),
+])
+
+ANSWER_WITH_DOCS_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", RAG_ANSWER_WITH_DOCS_PROMPT),
 ])
 
 ASSISTANT_PROMPT = ChatPromptTemplate.from_messages([

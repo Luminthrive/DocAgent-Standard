@@ -1,12 +1,34 @@
 import json
+import re
 import time
+
+import jieba
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import interrupt
-from agent_graph.prompts import ASSISTANT_PROMPT, ANSWER_PROMPT, HUMAN_CONFIRMATION_PROMPT, QUERY_REWRITE_PROMPT, COMPRESS_SUMMARY_PROMPT
+from agent_graph.prompts import ASSISTANT_PROMPT, ANSWER_PROMPT, ANSWER_WITH_DOCS_PROMPT, HUMAN_CONFIRMATION_PROMPT, QUERY_REWRITE_PROMPT, COMPRESS_SUMMARY_PROMPT
+from agent_graph.schema import SufficiencyAnswer
 from agent_graph.state import AgentState
 from loguru import logger
 from agent_graph.util import build_context, get_llm, get_last_user_message, get_last_tool_result
 from config import config
+
+
+def _build_fallback_answer(docs:list,reason:str="")->str:
+    """检索文档不足以回答时的兜底模板（附片段出处）"""
+    doc_snippets=[]
+    for i,doc in enumerate(docs[:3],1):
+        text=doc.get("content",{}).get("chunk_text","")[:200]
+        source=doc.get("metadata",{}).get("file_name") or "未知来源"
+        doc_snippets.append(f"【片段{i}】(来源: {source}) {text}")
+    docs_summary="\n".join(doc_snippets)
+    fallback=(
+        f"当前检索未找到足够匹配的信息，以下为检索到的相关参考内容：\n\n"
+        f"{docs_summary}\n\n"
+    )
+    if reason:
+        fallback+=f"可能缺少的信息：{reason}\n\n"
+    fallback+="您可以尝试调整问题描述重新提问。"
+    return fallback
 
 
 def create_node(tools):
@@ -200,11 +222,10 @@ def create_node(tools):
 
         # ═══════════════════════════════════════════════════════════
         # 信号1: Reranker 分数 (主信号，权重 60%)
+        # rerank_score 已是 [0,1] 归一化相关概率
+        # （模型服务端 sentence-transformers CrossEncoder.predict 对单标签模型默认做了 Sigmoid），无需再归一化
         # ═══════════════════════════════════════════════════════════
-        rerank_scores=[doc.get("rerank_score",0) for doc in docs]
-        # 归一化到 [0, 1] (rerank score 通常是 logits，范围约 [-10, 10])
-        import math
-        normalized_rerank=[1/(1+math.exp(-s)) for s in rerank_scores]
+        normalized_rerank=[doc.get("rerank_score",0) for doc in docs]
         avg_rerank=sum(normalized_rerank)/len(normalized_rerank) if normalized_rerank else 0
 
         # ═══════════════════════════════════════════════════════════
@@ -236,9 +257,6 @@ def create_node(tools):
         # 信号3: 内容覆盖度 (权重 15%)
         # 有多少 chunk 包含查询关键词
         # ═══════════════════════════════════════════════════════════
-        import jieba
-        import re
-
         def tokenize(text):
             """中英文混合分词：jieba 切词 + 英文整词保留"""
             tokens = set()
@@ -295,8 +313,10 @@ def create_node(tools):
         """
         Answer节点：生成最终回答
 
-        兜底逻辑：
-        - 如果检索文档质量差，输出"信息不足"模板而非强行编造
+        判定策略（仅针对本轮真实检索过，即 self_rag_score 非 None 的场景）：
+        - 主判断：LLM 结构化自判检索文档是否足以回答（with_structured_output，function calling）
+        - 兜底闸：结构化调用失败且 self_rag_score 低于中阈值时，输出兜底模板而非强行编造
+        - 人工在 HITL 明确选择 force_answer 时跳过一切自动判定，直接回答
         """
         start_ms=time.time()*1000
         trace_id=state.get("trace_id","")
@@ -305,41 +325,50 @@ def create_node(tools):
         history_context=build_context(state)
         effective_query=get_last_user_message(state["messages"]) or query
 
-        # 检查检索文档质量
-        rag_result=get_last_tool_result(state["messages"],"rag_search") or {}
-        docs=rag_result.get("docs") or []
+        docs=(get_last_tool_result(state["messages"],"rag_search") or {}).get("docs") or []
 
-        # 文档质量检查
-        has_quality_docs=False
-        if docs:
-            # 检查是否有高质量文档（rerank_score > 0.3）
-            for doc in docs:
-                score=doc.get("rerank_score") or doc.get("score",0)
-                if score>0.3:
-                    has_quality_docs=True
-                    break
+        # 仅对本轮真实检索过的场景做充分性判定：
+        # self_rag_score 为 None 表示本轮未检索（docs 可能来自历史轮次），直接走普通回答
+        if docs and state.get("self_rag_score") is not None and state.get("hitl_mode")!="force_answer":
+            try:
+                prompt_messages=ANSWER_WITH_DOCS_PROMPT.format_messages(
+                    history=history_context,query=effective_query
+                )
+                structured_llm=get_llm(temperature=0.7).with_structured_output(SufficiencyAnswer)
+                verdict=await structured_llm.ainvoke(
+                    prompt_messages+state.get("messages",[])
+                )
+                if verdict is not None and verdict.sufficient:
+                    logger.info(
+                        f"[trace:{trace_id}] [answer_node] "
+                        f"文档充分，生成回答 len={len(verdict.answer)} "
+                        f"duration={time.time()*1000-start_ms}ms"
+                    )
+                    return {"messages":[AIMessage(content=verdict.answer)]}
+                reason=verdict.answer if verdict is not None else ""
+                logger.info(
+                    f"[trace:{trace_id}] [answer_node] "
+                    f"LLM判定文档不足，返回兜底回答 duration={time.time()*1000-start_ms}ms"
+                )
+                return {"messages":[AIMessage(content=_build_fallback_answer(docs,reason))]}
+            except Exception as e:
+                self_rag_score=state.get("self_rag_score")
+                if self_rag_score is not None and self_rag_score<config.rag_score_mid_threshold:
+                    logger.warning(
+                        f"[trace:{trace_id}] [answer_node] "
+                        f"结构化自判失败且检索分数偏低({self_rag_score})，返回兜底回答 error={e}"
+                    )
+                    return {"messages":[AIMessage(content=_build_fallback_answer(docs))]}
+                logger.warning(
+                    f"[trace:{trace_id}] [answer_node] "
+                    f"结构化自判失败，降级为普通生成 error={e}"
+                )
 
-        # 如果文档质量差，生成兜底回答
-        if not has_quality_docs and docs:
-            # 构建参考文档摘要
-            doc_snippets=[]
-            for i,doc in enumerate(docs[:3],1):
-                text=doc.get("content",{}).get("chunk_text","")[:200]
-                doc_snippets.append(f"【片段{i}】{text}")
-            docs_summary="\n".join(doc_snippets)
-
-            fallback_response=(
-                f"当前检索未找到足够匹配的信息，以下为检索到的相关参考内容：\n\n"
-                f"{docs_summary}\n\n"
-                f"您可以尝试调整问题描述重新提问。"
-            )
-            logger.info(
-                f"[trace:{trace_id}] [answer_node] "
-                f"文档质量不足，返回兜底回答 duration={time.time()*1000-start_ms}ms"
-            )
-            return {"messages":[AIMessage(content=fallback_response)]}
-
-        # 正常回答流程
+        # 普通回答流程。到达此处的只有三类情况：
+        #   1. 本轮无检索（闲聊/追问）
+        #   2. force_answer（人工强制回答）
+        #   3. 降级：结构化自判调用失败且 self_rag_score >= 中阈值
+        # 正常情况下，凡本轮检索过（无论 self_rag 高分还是 rewrite 耗尽）都应已走完上面的完备性检查
         prompt_messages=ANSWER_PROMPT.format_messages(history=history_context,query=effective_query)
         messages=prompt_messages+state.get("messages",[])
         resp=await get_llm(temperature=0.7).ainvoke(messages)
@@ -370,8 +399,10 @@ def create_node(tools):
             context_parts=[]
             for i,doc in enumerate(docs[:3],1):
                 text=doc.get("content",{}).get("chunk_text","")[:300]
-                score=doc.get("rerank_score") or doc.get("score",0)
-                score_label="rerank" if doc.get("rerank_score") is not None else "vec"
+                rerank_score=doc.get("rerank_score")
+                # 显式判断 None：rerank_score 为 0.0 时不能回退到量纲不同的 RRF 分数
+                score=rerank_score if rerank_score is not None else doc.get("score",0)
+                score_label="rerank" if rerank_score is not None else "vec"
                 context_parts.append(f"[{i}] ({score_label}:{score:.2f}) {text}")
             context="\n".join(context_parts)
         else:

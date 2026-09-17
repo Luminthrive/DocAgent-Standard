@@ -17,4 +17,10 @@ class RagSearchInput(BaseModel):
     top_k:int =Field(default=5,description="返回文档数量。简单问题用3-5条，复杂问题或需要更多上下文时用8-10条")
 
 
+class SufficiencyAnswer(BaseModel):
+    """检索充分性自判结构化输出（answer_node 通过 with_structured_output 消费）"""
+    sufficient:bool=Field(description="检索到的文档是否足以回答用户问题")
+    answer:str=Field(description="sufficient=true 时为正式回答；false 时为简短的缺口说明")
+
+
 

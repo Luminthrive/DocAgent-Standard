@@ -21,7 +21,7 @@ qdrant_collection_size=1024  # BGE-M3 Dense 输出维度
 
 knowledge_base_dir=Path(__file__).parent.parent/"data"/"kb"
 
-max_self_rag_retries=3
+max_self_rag_retries=2  # self-rag 改写重试上限（不含首次检索，即单次提问最多检索 1+2 次）
 max_agent_iterations=8
 max_history_turns=10
 

@@ -41,8 +41,11 @@ class AgentService:
             "user_id": user_id,
             "kb_id": session_kb_id,
             "trace_id": trace_id,
-            "self_rag_score": 0.0,
+            # None 哨兵：本轮是否真实检索过由 self_rag_node 写入具体分数来区分
+            "self_rag_score": None,
             "retry_count": 0,
+            # 显式重置，防止 checkpointer 跨轮残留（如上一轮 force_answer 泄漏到本轮）
+            "hitl_mode": None,
             "human_confirmation": None,
         }
         return initial_state,trace_id

@@ -21,7 +21,7 @@ class RerankService:
         query: str,
         documents: List[Dict[str, Any]],
         top_k: int = 5,
-        score_threshold: float = -5.0,
+        score_threshold: float = 0.0,
     ) -> List[Dict[str, Any]]:
         """
         对检索结果进行精排
@@ -30,7 +30,7 @@ class RerankService:
             query: 用户查询
             documents: 混合检索返回的文档列表
             top_k: 返回前 top_k 个结果
-            score_threshold: 分数阈值，低于此分数的文档被过滤
+            score_threshold: 分数阈值（[0,1] 归一化相关概率，模型服务端 CrossEncoder.predict 已做 Sigmoid），低于此分数的文档被过滤
 
         Returns:
             精排后的文档列表
