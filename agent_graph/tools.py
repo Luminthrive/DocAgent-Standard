@@ -27,16 +27,24 @@ def create_tools(hybrid_search_service, knowledge_service):
         """
         use_multi = config.enable_multi_rewrite
 
+        if not kb_id:
+            #会话未绑定知识库（含存量 kb_id=None 的会话），返回引导信息而非静默空结果
+            return {
+                "docs": [],
+                "count": 0,
+                "error": "当前会话未绑定知识库，无法检索。请告知用户需绑定知识库后重试",
+            }
+
         docs = await hybrid_search_service.search(
             query=query,
-            kb_id=kb_id or "default",
+            kb_id=kb_id,
             top_k=top_k,
             use_multi_rewrite=use_multi,
         )
 
         return {"docs": docs, "count": len(docs)}
 
-    @tool(description="列出当前用户拥有的全部知识库。当用户询问有哪些知识库、想切换知识库、或需要知道知识库信息时调用此工具")
+    @tool(description="列出当前用户拥有的全部知识库。当用户询问有哪些知识库、或需要知道知识库信息时调用此工具")
     async def list_knowledge_bases(user_id: int) -> Dict[str, Any]:
         kbs = await knowledge_service.list_knowledge_bases(user_id=user_id, limit=100, offset=0)
         return {"knowledge_bases": kbs, "count": len(kbs)}

@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
 from starlette.responses import StreamingResponse
 from core.auth import get_current_user_id
-from core.dependencies import get_session_service, get_agent_service
+from core.dependencies import get_session_service, get_agent_service, get_knowledge_service
 from schema.agent_schema import CreateSessionRequest, SessionResponse, MessageResponse, RunAgentRequest, \
     HumanReviewRequired, AgentRunResponse
 
@@ -13,7 +13,8 @@ router=APIRouter()
 async def create_session(
         request:CreateSessionRequest,
         user_id:str=Depends(get_current_user_id),
-        session_service=Depends(get_session_service)
+        session_service=Depends(get_session_service),
+        kb_service=Depends(get_knowledge_service)
 ):
     """
     创建会话
@@ -21,6 +22,13 @@ async def create_session(
     :param user_id:
     :return:
     """
+    try:
+        int(request.kb_id)
+    except ValueError:
+        raise HTTPException(status_code=400,detail="kb_id格式错误")
+    kb=await kb_service.get_knowledge_base(request.kb_id,user_id)
+    if not kb:
+        raise HTTPException(status_code=404,detail="知识库不存在或无权访问")
     session=await session_service.create_session(
         user_id=user_id,
         kb_id=request.kb_id,

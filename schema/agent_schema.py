@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 class CreateSessionRequest(BaseModel):
     """创建会话请求"""
-    kb_id:Optional[str]=Field(None,description="关联知识库id（可选）")
+    kb_id:str=Field(...,description="关联知识库id（必填）")
     title:Optional[str]=Field(None,description="会话标题,可选可自动生成")
 
 class SessionResponse(BaseModel):

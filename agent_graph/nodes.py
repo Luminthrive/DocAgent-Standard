@@ -115,10 +115,9 @@ def create_node(tools):
             if (tool_name=="rag_search" and not tool_args.get("query")):
                 tool_args["query"]=state["current_query"]
 
-            if (tool_name=="rag_search" and not tool_args.get("kb_id")):
-                session_kb_id=state.get("kb_id")
-                if session_kb_id:
-                    tool_args["kb_id"]=session_kb_id
+            if tool_name=="rag_search":
+                #kb_id 由系统管控：无条件用会话绑定的知识库覆盖，LLM 传入的值一律忽略
+                tool_args["kb_id"]=state.get("kb_id")
 
             if tool_name=="list_knowledge_bases":
                 user_id=state.get("user_id")
